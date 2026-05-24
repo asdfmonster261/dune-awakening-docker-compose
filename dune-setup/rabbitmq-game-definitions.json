@@ -1,0 +1,27 @@
+{
+  "rabbit_version": "3.13.7",
+  "rabbitmq_version": "3.13.7",
+  "vhosts": [
+    {"name": "/"}
+  ],
+  "users": [],
+  "permissions": [],
+  "topic_permissions": [],
+  "parameters": [],
+  "global_parameters": [],
+  "exchanges": [],
+  "queues": [],
+  "bindings": [],
+  "policies": [
+    {
+      "vhost": "/",
+      "name": "player-queue-ttl",
+      "pattern": "^[0-9A-Fa-f]{16}_queue$",
+      "apply-to": "queues",
+      "priority": 0,
+      "definition": {
+        "expires": 600000
+      }
+    }
+  ]
+}

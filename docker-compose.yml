@@ -1,0 +1,1283 @@
+x-game-server-env: &game-server-env
+  POD_IP: 0.0.0.0
+  BATTLEGROUP: ${WORLD_UNIQUE_NAME}
+  BATTLEGROUP_DISPLAY_NAME: ${WORLD_UNIQUE_NAME}
+  BATTLEGROUP_REGION_NAME: ${WORLD_REGION}
+  FuncomLiveServices__ServiceAuthToken: ${FLS_TOKEN}
+  FuncomLiveServices__RmqTlsEnabled: "true"
+  RMQ_HTTP_TOKEN_AUTH_SECRET: ${RMQ_HTTP_TOKEN_AUTH_SECRET}
+  # Route K8s API traffic to dune-orchestrator so run.sh's install_cert,
+  # fetch_external_node_address, and amend_kubernetes_metadata reach our
+  # fake API server.
+  KUBERNETES_SERVICE_HOST: dune-orchestrator
+  KUBERNETES_SERVICE_PORT: "6443"
+  KUBERNETES_SERVICE_PORT_HTTPS: "6443"
+
+x-game-server-volumes: &game-server-volumes
+  - ./dune-setup/usersettings/UserEngine.ini:/home/dune/server/DuneSandbox/Saved/UserSettings/UserEngine.ini:ro
+  - ./dune-setup/usersettings/UserGame.ini:/home/dune/server/DuneSandbox/Saved/UserSettings/UserGame.ini:ro
+  - ./dune-setup/certs/cacert.pem:/etc/ssl/certs/rabbitmq-ca.pem:ro
+  - ./dune-setup/disable-ssh.sh:/etc/init.d/ssh:ro
+  - ./dune-setup/orchestrator/serviceaccount:/var/run/secrets/kubernetes.io/serviceaccount:ro
+
+x-game-server-deps: &game-server-deps
+  text-router:
+    condition: service_healthy
+  bg-director:
+    condition: service_started
+  dune-orchestrator:
+    condition: service_started
+
+# Default container log rotation. Without this the json-file driver writes
+# unbounded log files; a chatty game-server can fill disk over a few days.
+# 50m × 3 ≈ 150MB cap per container.
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "50m"
+    max-file: "3"
+
+# Shared block for all 28 on-demand maps: image, volumes, stop_grace_period,
+# depends_on, restart, profiles. Per-service fields (hostname, command,
+# environment, ports) merge over this with `<<: *on-demand-game-server`.
+#
+# `profiles: ["on-demand"]` keeps these services out of the default
+# `docker compose up`. Materialize them once after the first `up -d` with:
+#   docker compose --profile on-demand create
+# That creates the containers in "Created" state without starting them; the
+# dune-orchestrator starts/stops them on demand.
+x-on-demand-game-server: &on-demand-game-server
+  image: registry.funcom.com/funcom/self-hosting/seabass-server:1968181-0-shipping
+  logging: *default-logging
+  volumes: *game-server-volumes
+  stop_grace_period: 120s
+  depends_on: *game-server-deps
+  restart: "no"
+  profiles: ["on-demand"]
+
+services:
+  postgres:
+    image: registry.funcom.com/funcom/self-hosting/igw-postgres:17.4-alpine-fc-13
+    logging: *default-logging
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_SUPER_PASS}
+      POSTGRES_DB: dune
+      POSTGRES_DUNE_PASS: ${POSTGRES_DUNE_PASS}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./dune-setup/init-db.sh:/docker-entrypoint-initdb.d/01-init.sh:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d dune"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
+  db-utils:
+    image: registry.funcom.com/funcom/self-hosting/seabass-server-db-utils:1968181-0-shipping
+    logging: *default-logging
+    entrypoint: ["python", "startdb.py"]
+    # FUNCOM_POSTGRES_INSTALL points the funcomdb installation API at the system
+    # psql instead of its built-in installer (which only ships a Windows zip).
+    environment:
+      FUNCOM_POSTGRES_INSTALL: /usr
+    command:
+      - --host=postgres:5432
+      - --project-database=dune
+      - --project-user=dune
+      - --project-password=${POSTGRES_DUNE_PASS}
+      - --admin-user=postgres
+      - --admin-password=${POSTGRES_SUPER_PASS}
+      - --local-as-remote
+      - --unattended
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  partition-seed:
+    # One-shot: insert world_partition rows for the always-on maps.
+    # The K8s operator does this from BattleGroup CR spec.database…worldPartitions[];
+    # we have no operator, so we do it manually after db-utils applies the schema.
+    image: registry.funcom.com/funcom/self-hosting/igw-postgres:17.4-alpine-fc-13
+    logging: *default-logging
+    entrypoint: ["psql"]
+    environment:
+      PGPASSWORD: ${POSTGRES_DUNE_PASS}
+    command:
+      - -h
+      - postgres
+      - -U
+      - dune
+      - -d
+      - dune
+      - -v
+      - ON_ERROR_STOP=1
+      - -f
+      - /seed.sql
+    volumes:
+      - ./dune-setup/world-partitions.sql:/seed.sql:ro
+    depends_on:
+      db-utils:
+        condition: service_completed_successfully
+    restart: "no"
+
+  postgres-backup:
+    # Periodic pg_dump of the `dune` database to a named volume. Interval
+    # and retention are configurable via .env (see BACKUP_INTERVAL_SECONDS
+    # and BACKUP_RETENTION below); defaults give one snapshot per hour with
+    # a 24-hour rolling window. The dune user owns all the tables created
+    # by init-db.sh, so no superuser creds are needed here.
+    #
+    # Restore from a backup (with the stack down and postgres-data wiped):
+    #   docker compose up -d postgres
+    #   gunzip -c /var/lib/docker/volumes/dune-server_postgres-backups/_data/dune-YYYYMMDD-HHMMSS.sql.gz \
+    #     | docker compose exec -T postgres psql -U dune -d dune
+    image: registry.funcom.com/funcom/self-hosting/igw-postgres:17.4-alpine-fc-13
+    logging: *default-logging
+    entrypoint: ["sh", "-c"]
+    environment:
+      PGPASSWORD: ${POSTGRES_DUNE_PASS}
+      BACKUP_INTERVAL_SECONDS: ${BACKUP_INTERVAL_SECONDS:-3600}
+      BACKUP_RETENTION: ${BACKUP_RETENTION:-24}
+    command:
+      - |
+        mkdir -p /backups
+        echo "[$$(date -Iseconds)] backup loop starting: interval=$${BACKUP_INTERVAL_SECONDS}s retention=$${BACKUP_RETENTION}"
+        tail_skip=$$((BACKUP_RETENTION + 1))
+        while true; do
+          ts=$$(date -u +%Y%m%d-%H%M%S)
+          file=/backups/dune-$$ts.sql.gz
+          echo "[$$(date -Iseconds)] pg_dump → $$file"
+          if pg_dump -h postgres -U dune -d dune | gzip > $$file.tmp; then
+            mv $$file.tmp $$file
+            ls -1t /backups/dune-*.sql.gz | tail -n +$$tail_skip | xargs -r rm -f
+            echo "[$$(date -Iseconds)] backup complete; $$(ls /backups/dune-*.sql.gz | wc -l) snapshots retained"
+          else
+            rm -f $$file.tmp
+            echo "[$$(date -Iseconds)] pg_dump failed; will retry next cycle"
+          fi
+          sleep $$BACKUP_INTERVAL_SECONDS
+        done
+    volumes:
+      - postgres-backups:/backups
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  dune-orchestrator:
+    # HTTPS server impersonating the K8s API for the igw.funcom.com/v1
+    # BattleGroup CR + subresources. GETs serve a synthesized CR (from
+    # world.yaml); PATCHes are accepted, merged in memory, and logged.
+    # When bg-director PATCHes a ServerSetScale's spec.replicas, the
+    # orchestrator starts/stops the matching game-server-<map> container via
+    # the mounted docker.sock.
+    build:
+      context: ./dune-setup/orchestrator
+      dockerfile: Dockerfile
+    image: dune-orchestrator:latest
+    logging: *default-logging
+    hostname: dune-orchestrator
+    environment:
+      # Compose project name — orchestrator filters containers by this label
+      # when resolving service → container. Override if you launch compose
+      # from a different directory or set -p.
+      COMPOSE_PROJECT_NAME: dune-server
+      # Public/LAN IP returned to run.sh from GET /api/v1/nodes/{name}. The
+      # game-server reads status.addresses[].address as its external IP when
+      # advertising to the gateway/FLS.
+      HOST_IP: ${HOST_IP}
+      # Postgres creds for the stale-farm_state cleanup goroutine. The
+      # cleanup compares farm_state.igw_addr IPs against running game-server
+      # container IPs and DELETEs rows whose container is gone. If
+      # POSTGRES_DUNE_PASS is unset the cleanup is silently disabled.
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_USER: dune
+      POSTGRES_DB: dune
+      POSTGRES_DUNE_PASS: ${POSTGRES_DUNE_PASS}
+    volumes:
+      - ./dune-setup/certs/orchestrator-cert.pem:/certs/cert.pem:ro
+      - ./dune-setup/certs/orchestrator-key.pem:/certs/key.pem:ro
+      - ./dune-setup/orchestrator/world.yaml:/world.yaml:ro
+      - /var/run/docker.sock:/var/run/docker.sock
+    restart: unless-stopped
+
+  dune-admin:
+    # Web-based admin panel — players/inventory/teleport/SQL/logs/etc.
+    # Source lives in a sibling repo (../dune-admin) so it can be tracked
+    # independently. The image is built locally; web UI is embedded in the
+    # binary via go:embed.
+    #
+    # Talks to:
+    #   - postgres   (DB queries for the Players / Database / Storage tabs)
+    #   - dune-orchestrator (HTTPS, for the Battlegroup status tab)
+    #   - rabbitmq-{admin,game} (AMQP, for the Notify endpoint + capture mode)
+    #   - /var/run/docker.sock (logs streaming + start/stop + capture exec)
+    build:
+      context: ./dune-admin
+      dockerfile: Dockerfile
+    image: dune-admin:latest
+    logging: *default-logging
+    hostname: dune-admin
+    ports:
+      # LAN-accessible. Public exposure should be behind a reverse proxy
+      # with auth.
+      - "6847:8080"
+    environment:
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      DB_USER: dune
+      DB_PASS: ${POSTGRES_DUNE_PASS}
+      DB_NAME: dune
+      DB_SCHEMA: dune
+      ORCHESTRATOR_URL: https://dune-orchestrator:6443
+      ORCHESTRATOR_INSECURE: "true"
+      BATTLEGROUP_NS: funcom-seabass-${WORLD_UNIQUE_NAME}
+      DOCKER_PROJECT: dune-server
+      LISTEN_ADDR: ":8080"
+      ALLOWED_ORIGINS: http://localhost:6847
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      postgres:
+        condition: service_healthy
+      dune-orchestrator:
+        condition: service_started
+    restart: unless-stopped
+
+  rabbitmq-admin:
+    image: registry.funcom.com/funcom/self-hosting/seabass-server-rabbitmq:1968181-0-shipping
+    logging: *default-logging
+    hostname: rabbitmq-admin
+    environment:
+      RMQ_AUTH_BACKEND_1: cache
+      RMQ_HTTP_AUTH_ADDRESS: text-router:8080
+      RMQ_HTTP_TOKEN_AUTH_SECRET: ${RMQ_HTTP_TOKEN_AUTH_SECRET}
+      FuncomLiveServices__RmqTlsEnabled: "false"
+      FuncomLiveServices__ServiceAuthToken: ${FLS_TOKEN}
+    volumes:
+      - ./dune-setup/rabbitmq-admin.conf:/etc/rabbitmq/conf.d/20-system.conf:ro
+      - ./dune-setup/rabbitmq-plugins:/etc/rabbitmq/enabled_plugins:ro
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 10s
+      retries: 30
+      start_period: 30s
+    restart: unless-stopped
+
+  rabbitmq-game:
+    image: registry.funcom.com/funcom/self-hosting/seabass-server-rabbitmq:1968181-0-shipping
+    logging: *default-logging
+    hostname: rabbitmq-game
+    environment:
+      RMQ_AUTH_BACKEND_1: cache
+      RMQ_HTTP_AUTH_ADDRESS: text-router:8080
+      RMQ_HTTP_TOKEN_AUTH_SECRET: ${RMQ_HTTP_TOKEN_AUTH_SECRET}
+      FuncomLiveServices__RmqTlsEnabled: "true"
+      FuncomLiveServices__ServiceAuthToken: ${FLS_TOKEN}
+    volumes:
+      - ./dune-setup/rabbitmq-game.conf:/etc/rabbitmq/conf.d/20-system.conf:ro
+      - ./dune-setup/rabbitmq-game-definitions.json:/etc/rabbitmq/definitions.json:ro
+      - ./dune-setup/rabbitmq-plugins:/etc/rabbitmq/enabled_plugins:ro
+      - ./dune-setup/certs/cacert.pem:/etc/rabbitmq/cacert.pem:ro
+      - ./dune-setup/certs/cert.pem:/etc/rabbitmq/cert.pem:ro
+      - ./dune-setup/certs/key.pem:/etc/rabbitmq/key.pem:ro
+    ports:
+      - "31982:5672/tcp"
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 10s
+      retries: 30
+      start_period: 30s
+    restart: unless-stopped
+
+  text-router:
+    image: registry.funcom.com/funcom/self-hosting/seabass-server-text-router:1968181-0-shipping
+    logging: *default-logging
+    command:
+      - --RMQGameHostname=rabbitmq-game
+      - --RMQGamePort=5672
+      - --RMQAdminHostname=rabbitmq-admin
+      - --RMQAdminPort=5672
+    environment:
+      BATTLEGROUP: ${WORLD_UNIQUE_NAME}
+      # text-router uses BATTLEGROUP_DISPLAY_NAME as its RMQ identity prefix
+      # (tr.{display_name}.{PCID}), so it gets the friendly name.
+      BATTLEGROUP_DISPLAY_NAME: ${WORLD_NAME}
+      BATTLEGROUP_LANGUAGE: en-US
+      BATTLEGROUP_REGION_NAME: ${WORLD_REGION}
+      Database_address: postgres:5432
+      Database_name: dune
+      Database_user: dune
+      Database_password: ${POSTGRES_DUNE_PASS}
+      Database__address: postgres
+      Database__port: "5432"
+      Database__user: dune
+      Database__password: ${POSTGRES_DUNE_PASS}
+      Database__name: dune
+      FuncomLiveServices__ServiceAuthToken: ${FLS_TOKEN}
+      FuncomLiveServices__RmqTlsEnabled: "true"
+      HOST_DATACENTER_ID: ${HOST_DATACENTER_ID}
+      HOST_DATACENTER_IP_ADDRESS: ${HOST_IP}
+      RMQ_HTTP_TOKEN_AUTH_SECRET: ${RMQ_HTTP_TOKEN_AUTH_SECRET}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq-admin:
+        condition: service_healthy
+      rabbitmq-game:
+        condition: service_healthy
+      partition-seed:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/status >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    restart: unless-stopped
+
+  bg-director:
+    image: registry.funcom.com/funcom/self-hosting/seabass-server-bg-director:1968181-0-shipping
+    logging: *default-logging
+    command:
+      - --RMQGameHostname=rabbitmq-game
+      - --RMQGamePort=5672
+      - --RMQAdminHostname=rabbitmq-admin
+      - --RMQAdminPort=5672
+    environment:
+      BATTLEGROUP: ${WORLD_UNIQUE_NAME}
+      # bg-director reads BATTLEGROUP_DISPLAY_NAME and uses it as the
+      # BattlegroupId in its FLS Director_InitializeDirector call. Without it
+      # the binary falls back to LOCAL-{containerMAC}-ROOT and FLS rejects auth.
+      BATTLEGROUP_DISPLAY_NAME: ${WORLD_UNIQUE_NAME}
+      BATTLEGROUP_REGION_NAME: ${WORLD_REGION}
+      Database_address: postgres:5432
+      Database_name: dune
+      Database_user: dune
+      Database_password: ${POSTGRES_DUNE_PASS}
+      Database__address: postgres
+      Database__port: "5432"
+      Database__user: dune
+      Database__password: ${POSTGRES_DUNE_PASS}
+      Database__name: dune
+      FuncomLiveServices__ServiceAuthToken: ${FLS_TOKEN}
+      FuncomLiveServices__RmqTlsEnabled: "true"
+      HOST_DATACENTER_ID: ${HOST_DATACENTER_ID}
+      HOST_DATACENTER_IP_ADDRESS: ${HOST_IP}
+      RMQ_HTTP_TOKEN_AUTH_SECRET: ${RMQ_HTTP_TOKEN_AUTH_SECRET}
+      # K8s API access via dune-orchestrator (serves BattleGroup CR +
+      # ServerSetScale list; accepts stats PATCHes from the director).
+      KUBERNETES_SERVICE_HOST: dune-orchestrator
+      KUBERNETES_SERVICE_PORT: "6443"
+      KUBERNETES_SERVICE_PORT_HTTPS: "6443"
+    volumes:
+      - ./dune-setup/director.ini:/etc/app/conf.d/director.ini:ro
+      - ./dune-setup/orchestrator/serviceaccount:/var/run/secrets/kubernetes.io/serviceaccount:ro
+    ports:
+      - "6845:8080/tcp"
+    depends_on:
+      text-router:
+        condition: service_healthy
+      dune-orchestrator:
+        condition: service_started
+    restart: unless-stopped
+
+  server-gateway:
+    image: registry.funcom.com/funcom/self-hosting/seabass-server-gateway:1968181-0-shipping
+    logging: *default-logging
+    environment:
+      FuncomLiveServices__ServiceAuthToken: ${FLS_TOKEN}
+      FuncomLiveServices__RmqTlsEnabled: "true"
+      FuncomLiveServices__BattlegroupAuthorizationPreset: BattlegroupInternal
+      HOST_DATACENTER_ID: ${HOST_DATACENTER_ID}
+      HOST_DATACENTER_IP_ADDRESS: ${HOST_IP}
+      RMQ_HTTP_TOKEN_AUTH_SECRET: ${RMQ_HTTP_TOKEN_AUTH_SECRET}
+      # Read directly from os.environ.get() in initialize_battlegroup, not from INI.
+      BATTLEGROUP_LANGUAGE: en-US
+      fls-apikey: ${FLS_API_KEY}
+    volumes:
+      - ./dune-setup/gateway-override.ini:/etc/app/conf.d/gateway.ini:ro
+    depends_on:
+      text-router:
+        condition: service_healthy
+    restart: unless-stopped
+
+  filebrowser:
+    image: filebrowser/filebrowser:v2.18.0
+    logging: *default-logging
+    command: ["-d", "/db/filebrowser.db", "-r", "/srv"]
+    volumes:
+      - ./dune-setup/usersettings:/srv
+      - filebrowser-data:/db
+    ports:
+      - "6846:80/tcp"
+    restart: unless-stopped
+
+  game-server-survival:
+    image: registry.funcom.com/funcom/self-hosting/seabass-server:1968181-0-shipping
+    logging: *default-logging
+    # hostname/POD_NAME end in -0 to mimic K8s StatefulSet pod ordinals; the
+    # game-server binary parses the trailing number as its stable server index.
+    hostname: game-server-survival-0
+    command:
+      - /home/dune/run.sh
+      # No positional map arg — Survival_1 is the ServerDefaultMap baked into
+      # DefaultEngine.ini, so the binary loads it by default.
+      - -FarmRegion=${WORLD_REGION}
+      # ServerName pins every game-server in this battlegroup to the same
+      # OnlineSubsystem identity, so S2S peers accept each other's handshake.
+      # Without it each server falls back to LOCAL-<hostname>-<user> and the
+      # leader rejects followers with "BuildId, ServerName or MapName mismatch".
+      - -ini:engine:[OnlineSubsystem]:ServerName=${WORLD_UNIQUE_NAME}
+      - -ini:engine:[FuncomLiveServices]:ServiceAuthToken=${FLS_TOKEN}
+      - -ini:game:[DuneDatabaseInterfacePSQL]:DatabasePassword=${POSTGRES_DUNE_PASS}
+      - -RMQGameTlsEnabled=true
+      - --RMQGameHostname=rabbitmq-game
+      - --RMQGamePort=5672
+      - --RMQAdminHostname=rabbitmq-admin
+      - --RMQAdminPort=5672
+      - -ExternalAddress=${HOST_IP}
+      - -ini:engine:[URL]:Port=7777
+      - -ini:engine:[URL]:IGWPort=7888
+      # -PartitionIndex enables stable indices mode. Required for fast
+      # startup; without it the binary falls back to S2S leader elections
+      # (2-5 min delay per server). Pairs with the -0 hostname suffix and
+      # the matching ServerName above.
+      - -PartitionIndex=1
+      - -log
+    environment:
+      <<: *game-server-env
+      POD_NAME: game-server-survival-0
+      NODE_NAME: game-server-survival-0
+    volumes: *game-server-volumes
+    ports:
+      - "7777:7777/udp"
+    mem_limit: 12g
+    stop_grace_period: 120s
+    depends_on:
+      text-router:
+        condition: service_healthy
+      bg-director:
+        condition: service_started
+      dune-orchestrator:
+        condition: service_started
+    restart: unless-stopped
+
+  game-server-overmap:
+    image: registry.funcom.com/funcom/self-hosting/seabass-server:1968181-0-shipping
+    logging: *default-logging
+    hostname: game-server-overmap-0
+    command:
+      - /home/dune/run.sh
+      # Positional map URL must be the FIRST arg after run.sh (i.e. the second
+      # positional after DuneSandboxServer.sh prepends the project name). UE's
+      # URL parser takes the immediate-next positional after the project; if
+      # flags come between project and URL, UE treats the project itself as the
+      # URL and falls back to ServerDefaultMap.
+      - Overmap
+      - -FarmRegion=${WORLD_REGION}
+      - -ini:engine:[OnlineSubsystem]:ServerName=${WORLD_UNIQUE_NAME}
+      - -ini:engine:[FuncomLiveServices]:ServiceAuthToken=${FLS_TOKEN}
+      - -ini:game:[DuneDatabaseInterfacePSQL]:DatabasePassword=${POSTGRES_DUNE_PASS}
+      - -RMQGameTlsEnabled=true
+      - --RMQGameHostname=rabbitmq-game
+      - --RMQGamePort=5672
+      - --RMQAdminHostname=rabbitmq-admin
+      - --RMQAdminPort=5672
+      - -ExternalAddress=${HOST_IP}
+      - -ini:engine:[URL]:Port=7778
+      - -ini:engine:[URL]:IGWPort=7889
+      - -PartitionIndex=2
+      - -log
+    environment:
+      <<: *game-server-env
+      POD_NAME: game-server-overmap-0
+      NODE_NAME: game-server-overmap-0
+    volumes: *game-server-volumes
+    ports:
+      - "7778:7778/udp"
+    mem_limit: 2g
+    stop_grace_period: 120s
+    depends_on:
+      text-router:
+        condition: service_healthy
+      bg-director:
+        condition: service_started
+      dune-orchestrator:
+        condition: service_started
+    restart: unless-stopped
+
+
+  # ------------------------------------------------------------------------
+  # On-demand maps. Not started by `docker compose up`; the dune-orchestrator
+  # starts them via docker.sock when bg-director PATCHes the matching
+  # ServerSetScale's spec.replicas to N≥1, and stops them when N→0. Partition
+  # IDs match worldPartitions[] in world-template.yaml. Host port =
+  # 7776 + partitionId (game), 7887 + partitionId (IGW).
+  # ------------------------------------------------------------------------
+
+  game-server-sh-arrakeen:
+    <<: *on-demand-game-server
+    hostname: game-server-sh-arrakeen-0
+    command:
+      - /home/dune/run.sh
+      - SH_Arrakeen
+      - -FarmRegion=${WORLD_REGION}
+      - -ini:engine:[OnlineSubsystem]:ServerName=${WORLD_UNIQUE_NAME}
+      - -ini:engine:[FuncomLiveServices]:ServiceAuthToken=${FLS_TOKEN}
+      - -ini:game:[DuneDatabaseInterfacePSQL]:DatabasePassword=${POSTGRES_DUNE_PASS}
+      - -RMQGameTlsEnabled=true
+      - --RMQGameHostname=rabbitmq-game
+      - --RMQGamePort=5672
+      - --RMQAdminHostname=rabbitmq-admin
+      - --RMQAdminPort=5672
+      - -ExternalAddress=${HOST_IP}
+      - -ini:engine:[URL]:Port=7779
+      - -ini:engine:[URL]:IGWPort=7890
+      - -PartitionIndex=3
+      - -log
+    environment:
+      <<: *game-server-env
+      POD_NAME: game-server-sh-arrakeen-0
+      NODE_NAME: game-server-sh-arrakeen-0
+    ports:
+      - "7779:7779/udp"
+
+  game-server-sh-harkovillage:
+    <<: *on-demand-game-server
+    hostname: game-server-sh-harkovillage-0
+    command:
+      - /home/dune/run.sh
+      - SH_HarkoVillage
+      - -FarmRegion=${WORLD_REGION}
+      - -ini:engine:[OnlineSubsystem]:ServerName=${WORLD_UNIQUE_NAME}
+      - -ini:engine:[FuncomLiveServices]:ServiceAuthToken=${FLS_TOKEN}
+      - -ini:game:[DuneDatabaseInterfacePSQL]:DatabasePassword=${POSTGRES_DUNE_PASS}
+      - -RMQGameTlsEnabled=true
+      - --RMQGameHostname=rabbitmq-game
+      - --RMQGamePort=5672
+      - --RMQAdminHostname=rabbitmq-admin
+      - --RMQAdminPort=5672
+      - -ExternalAddress=${HOST_IP}
+      - -ini:engine:[URL]:Port=7780
+      - -ini:engine:[URL]:IGWPort=7891
+      - -PartitionIndex=4
+      - -log
+    environment:
+      <<: *game-server-env
+      POD_NAME: game-server-sh-harkovillage-0
+      NODE_NAME: game-server-sh-harkovillage-0
+    ports:
+      - "7780:7780/udp"
+
+  game-server-cb-story-hephaestus:
+    <<: *on-demand-game-server
+    hostname: game-server-cb-story-hephaestus-0
+    command:
+      - /home/dune/run.sh
+      - CB_Story_Hephaestus
+      - -FarmRegion=${WORLD_REGION}
+      - -ini:engine:[OnlineSubsystem]:ServerName=${WORLD_UNIQUE_NAME}
+      - -ini:engine:[FuncomLiveServices]:ServiceAuthToken=${FLS_TOKEN}
+      - -ini:game:[DuneDatabaseInterfacePSQL]:DatabasePassword=${POSTGRES_DUNE_PASS}
+      - -RMQGameTlsEnabled=true
+      - --RMQGameHostname=rabbitmq-game
+      - --RMQGamePort=5672
+      - --RMQAdminHostname=rabbitmq-admin
+      - --RMQAdminPort=5672
+      - -ExternalAddress=${HOST_IP}
+      - -ini:engine:[URL]:Port=7781
+      - -ini:engine:[URL]:IGWPort=7892
+      - -PartitionIndex=5
+      - -log
+    environment:
+      <<: *game-server-env
+      POD_NAME: game-server-cb-story-hephaestus-0
+      NODE_NAME: game-server-cb-story-hephaestus-0
+    ports:
+      - "7781:7781/udp"
+
+  game-server-cb-story-ecolab-carthag:
+    <<: *on-demand-game-server
+    hostname: game-server-cb-story-ecolab-carthag-0
+    command:
+      - /home/dune/run.sh
+      - CB_Story_Ecolab_Carthag
+      - -FarmRegion=${WORLD_REGION}
+      - -ini:engine:[OnlineSubsystem]:ServerName=${WORLD_UNIQUE_NAME}
+      - -ini:engine:[FuncomLiveServices]:ServiceAuthToken=${FLS_TOKEN}
+      - -ini:game:[DuneDatabaseInterfacePSQL]:DatabasePassword=${POSTGRES_DUNE_PASS}
+      - -RMQGameTlsEnabled=true
+      - --RMQGameHostname=rabbitmq-game
+      - --RMQGamePort=5672
+      - --RMQAdminHostname=rabbitmq-admin
+      - --RMQAdminPort=5672
+      - -ExternalAddress=${HOST_IP}
+      - -ini:engine:[URL]:Port=7782
+      - -ini:engine:[URL]:IGWPort=7893
+      - -PartitionIndex=6
+      - -log
+    environment:
+      <<: *game-server-env
+      POD_NAME: game-server-cb-story-ecolab-carthag-0
+      NODE_NAME: game-server-cb-story-ecolab-carthag-0
+    ports:
+      - "7782:7782/udp"
+
+  game-server-cb-story-waterfatmanor:
+    <<: *on-demand-game-server
+    hostname: game-server-cb-story-waterfatmanor-0
+    command:
+      - /home/dune/run.sh
+      - CB_Story_WaterFatManor
+      - -FarmRegion=${WORLD_REGION}
+      - -ini:engine:[OnlineSubsystem]:ServerName=${WORLD_UNIQUE_NAME}
+      - -ini:engine:[FuncomLiveServices]:ServiceAuthToken=${FLS_TOKEN}
+      - -ini:game:[DuneDatabaseInterfacePSQL]:DatabasePassword=${POSTGRES_DUNE_PASS}
+      - -RMQGameTlsEnabled=true
+      - --RMQGameHostname=rabbitmq-game
+      - --RMQGamePort=5672
+      - --RMQAdminHostname=rabbitmq-admin
+      - --RMQAdminPort=5672
+      - -ExternalAddress=${HOST_IP}
+      - -ini:engine:[URL]:Port=7783
+      - -ini:engine:[URL]:IGWPort=7894
+      - -PartitionIndex=7
+      - -log
+    environment:
+      <<: *game-server-env
+      POD_NAME: game-server-cb-story-waterfatmanor-0
+      NODE_NAME: game-server-cb-story-waterfatmanor-0
+    ports:
+      - "7783:7783/udp"
+
+  game-server-deepdesert-1:
+    <<: *on-demand-game-server
+    hostname: game-server-deepdesert-1-0
+    command:
+      - /home/dune/run.sh
+      - DeepDesert_1
+      - -FarmRegion=${WORLD_REGION}
+      - -ini:engine:[OnlineSubsystem]:ServerName=${WORLD_UNIQUE_NAME}
+      - -ini:engine:[FuncomLiveServices]:ServiceAuthToken=${FLS_TOKEN}
+      - -ini:game:[DuneDatabaseInterfacePSQL]:DatabasePassword=${POSTGRES_DUNE_PASS}
+      - -RMQGameTlsEnabled=true
+      - --RMQGameHostname=rabbitmq-game
+      - --RMQGamePort=5672
+      - --RMQAdminHostname=rabbitmq-admin
+      - --RMQAdminPort=5672
+      - -ExternalAddress=${HOST_IP}
+      - -ini:engine:[URL]:Port=7784
+      - -ini:engine:[URL]:IGWPort=7895
+      - -PartitionIndex=8
+      - -log
+    environment:
+      <<: *game-server-env
+      POD_NAME: game-server-deepdesert-1-0
+      NODE_NAME: game-server-deepdesert-1-0
+    ports:
+      - "7784:7784/udp"
+
+  game-server-story-procesverbal:
+    <<: *on-demand-game-server
+    hostname: game-server-story-procesverbal-0
+    command:
+      - /home/dune/run.sh
+      - Story_ProcesVerbal
+      - -FarmRegion=${WORLD_REGION}
+      - -ini:engine:[OnlineSubsystem]:ServerName=${WORLD_UNIQUE_NAME}
+      - -ini:engine:[FuncomLiveServices]:ServiceAuthToken=${FLS_TOKEN}
+      - -ini:game:[DuneDatabaseInterfacePSQL]:DatabasePassword=${POSTGRES_DUNE_PASS}
+      - -RMQGameTlsEnabled=true
+      - --RMQGameHostname=rabbitmq-game
+      - --RMQGamePort=5672
+      - --RMQAdminHostname=rabbitmq-admin
+      - --RMQAdminPort=5672
+      - -ExternalAddress=${HOST_IP}
+      - -ini:engine:[URL]:Port=7785
+      - -ini:engine:[URL]:IGWPort=7896
+      - -PartitionIndex=9
+      - -log
+    environment:
+      <<: *game-server-env
+      POD_NAME: game-server-story-procesverbal-0
+      NODE_NAME: game-server-story-procesverbal-0
+    ports:
+      - "7785:7785/udp"
+
+  game-server-dlc-story-lostharvest-ecolaba:
+    <<: *on-demand-game-server
+    hostname: game-server-dlc-story-lostharvest-ecolaba-0
+    command:
+      - /home/dune/run.sh
+      - DLC_Story_LostHarvest_EcolabA
+      - -FarmRegion=${WORLD_REGION}
+      - -ini:engine:[OnlineSubsystem]:ServerName=${WORLD_UNIQUE_NAME}
+      - -ini:engine:[FuncomLiveServices]:ServiceAuthToken=${FLS_TOKEN}
+      - -ini:game:[DuneDatabaseInterfacePSQL]:DatabasePassword=${POSTGRES_DUNE_PASS}
+      - -RMQGameTlsEnabled=true
+      - --RMQGameHostname=rabbitmq-game
+      - --RMQGamePort=5672
+      - --RMQAdminHostname=rabbitmq-admin
+      - --RMQAdminPort=5672
+      - -ExternalAddress=${HOST_IP}
+      - -ini:engine:[URL]:Port=7786
+      - -ini:engine:[URL]:IGWPort=7897
+      - -PartitionIndex=10
+      - -log
+    environment:
+      <<: *game-server-env
+      POD_NAME: game-server-dlc-story-lostharvest-ecolaba-0
+      NODE_NAME: game-server-dlc-story-lostharvest-ecolaba-0
+    ports:
+      - "7786:7786/udp"
+
+  game-server-dlc-story-lostharvest-ecolabb:
+    <<: *on-demand-game-server
+    hostname: game-server-dlc-story-lostharvest-ecolabb-0
+    command:
+      - /home/dune/run.sh
+      - DLC_Story_LostHarvest_EcolabB
+      - -FarmRegion=${WORLD_REGION}
+      - -ini:engine:[OnlineSubsystem]:ServerName=${WORLD_UNIQUE_NAME}
+      - -ini:engine:[FuncomLiveServices]:ServiceAuthToken=${FLS_TOKEN}
+      - -ini:game:[DuneDatabaseInterfacePSQL]:DatabasePassword=${POSTGRES_DUNE_PASS}
+      - -RMQGameTlsEnabled=true
+      - --RMQGameHostname=rabbitmq-game
+      - --RMQGamePort=5672
+      - --RMQAdminHostname=rabbitmq-admin
+      - --RMQAdminPort=5672
+      - -ExternalAddress=${HOST_IP}
+      - -ini:engine:[URL]:Port=7787
+      - -ini:engine:[URL]:IGWPort=7898
+      - -PartitionIndex=11
+      - -log
+    environment:
+      <<: *game-server-env
+      POD_NAME: game-server-dlc-story-lostharvest-ecolabb-0
+      NODE_NAME: game-server-dlc-story-lostharvest-ecolabb-0
+    ports:
+      - "7787:7787/udp"
+
+  game-server-dlc-story-lostharvest-forgottenlab:
+    <<: *on-demand-game-server
+    hostname: game-server-dlc-story-lostharvest-forgottenlab-0
+    command:
+      - /home/dune/run.sh
+      - DLC_Story_LostHarvest_ForgottenLab
+      - -FarmRegion=${WORLD_REGION}
+      - -ini:engine:[OnlineSubsystem]:ServerName=${WORLD_UNIQUE_NAME}
+      - -ini:engine:[FuncomLiveServices]:ServiceAuthToken=${FLS_TOKEN}
+      - -ini:game:[DuneDatabaseInterfacePSQL]:DatabasePassword=${POSTGRES_DUNE_PASS}
+      - -RMQGameTlsEnabled=true
+      - --RMQGameHostname=rabbitmq-game
+      - --RMQGamePort=5672
+      - --RMQAdminHostname=rabbitmq-admin
+      - --RMQAdminPort=5672
+      - -ExternalAddress=${HOST_IP}
+      - -ini:engine:[URL]:Port=7788
+      - -ini:engine:[URL]:IGWPort=7899
+      - -PartitionIndex=12
+      - -log
+    environment:
+      <<: *game-server-env
+      POD_NAME: game-server-dlc-story-lostharvest-forgottenlab-0
+      NODE_NAME: game-server-dlc-story-lostharvest-forgottenlab-0
+    ports:
+      - "7788:7788/udp"
+
+  game-server-story-artofkanly:
+    <<: *on-demand-game-server
+    hostname: game-server-story-artofkanly-0
+    command:
+      - /home/dune/run.sh
+      - Story_ArtOfKanly
+      - -FarmRegion=${WORLD_REGION}
+      - -ini:engine:[OnlineSubsystem]:ServerName=${WORLD_UNIQUE_NAME}
+      - -ini:engine:[FuncomLiveServices]:ServiceAuthToken=${FLS_TOKEN}
+      - -ini:game:[DuneDatabaseInterfacePSQL]:DatabasePassword=${POSTGRES_DUNE_PASS}
+      - -RMQGameTlsEnabled=true
+      - --RMQGameHostname=rabbitmq-game
+      - --RMQGamePort=5672
+      - --RMQAdminHostname=rabbitmq-admin
+      - --RMQAdminPort=5672
+      - -ExternalAddress=${HOST_IP}
+      - -ini:engine:[URL]:Port=7789
+      - -ini:engine:[URL]:IGWPort=7900
+      - -PartitionIndex=13
+      - -log
+    environment:
+      <<: *game-server-env
+      POD_NAME: game-server-story-artofkanly-0
+      NODE_NAME: game-server-story-artofkanly-0
+    ports:
+      - "7789:7789/udp"
+
+  game-server-cb-dungeon-hephaestus:
+    <<: *on-demand-game-server
+    hostname: game-server-cb-dungeon-hephaestus-0
+    command:
+      - /home/dune/run.sh
+      - CB_Dungeon_Hephaestus
+      - -FarmRegion=${WORLD_REGION}
+      - -ini:engine:[OnlineSubsystem]:ServerName=${WORLD_UNIQUE_NAME}
+      - -ini:engine:[FuncomLiveServices]:ServiceAuthToken=${FLS_TOKEN}
+      - -ini:game:[DuneDatabaseInterfacePSQL]:DatabasePassword=${POSTGRES_DUNE_PASS}
+      - -RMQGameTlsEnabled=true
+      - --RMQGameHostname=rabbitmq-game
+      - --RMQGamePort=5672
+      - --RMQAdminHostname=rabbitmq-admin
+      - --RMQAdminPort=5672
+      - -ExternalAddress=${HOST_IP}
+      - -ini:engine:[URL]:Port=7790
+      - -ini:engine:[URL]:IGWPort=7901
+      - -PartitionIndex=14
+      - -log
+    environment:
+      <<: *game-server-env
+      POD_NAME: game-server-cb-dungeon-hephaestus-0
+      NODE_NAME: game-server-cb-dungeon-hephaestus-0
+    ports:
+      - "7790:7790/udp"
+
+  game-server-cb-dungeon-oldcarthag:
+    <<: *on-demand-game-server
+    hostname: game-server-cb-dungeon-oldcarthag-0
+    command:
+      - /home/dune/run.sh
+      - CB_Dungeon_OldCarthag
+      - -FarmRegion=${WORLD_REGION}
+      - -ini:engine:[OnlineSubsystem]:ServerName=${WORLD_UNIQUE_NAME}
+      - -ini:engine:[FuncomLiveServices]:ServiceAuthToken=${FLS_TOKEN}
+      - -ini:game:[DuneDatabaseInterfacePSQL]:DatabasePassword=${POSTGRES_DUNE_PASS}
+      - -RMQGameTlsEnabled=true
+      - --RMQGameHostname=rabbitmq-game
+      - --RMQGamePort=5672
+      - --RMQAdminHostname=rabbitmq-admin
+      - --RMQAdminPort=5672
+      - -ExternalAddress=${HOST_IP}
+      - -ini:engine:[URL]:Port=7791
+      - -ini:engine:[URL]:IGWPort=7902
+      - -PartitionIndex=15
+      - -log
+    environment:
+      <<: *game-server-env
+      POD_NAME: game-server-cb-dungeon-oldcarthag-0
+      NODE_NAME: game-server-cb-dungeon-oldcarthag-0
+    ports:
+      - "7791:7791/udp"
+
+  game-server-story-faction-outpost-atre:
+    <<: *on-demand-game-server
+    hostname: game-server-story-faction-outpost-atre-0
+    command:
+      - /home/dune/run.sh
+      - Story_Faction_Outpost_Atre
+      - -FarmRegion=${WORLD_REGION}
+      - -ini:engine:[OnlineSubsystem]:ServerName=${WORLD_UNIQUE_NAME}
+      - -ini:engine:[FuncomLiveServices]:ServiceAuthToken=${FLS_TOKEN}
+      - -ini:game:[DuneDatabaseInterfacePSQL]:DatabasePassword=${POSTGRES_DUNE_PASS}
+      - -RMQGameTlsEnabled=true
+      - --RMQGameHostname=rabbitmq-game
+      - --RMQGamePort=5672
+      - --RMQAdminHostname=rabbitmq-admin
+      - --RMQAdminPort=5672
+      - -ExternalAddress=${HOST_IP}
+      - -ini:engine:[URL]:Port=7792
+      - -ini:engine:[URL]:IGWPort=7903
+      - -PartitionIndex=16
+      - -log
+    environment:
+      <<: *game-server-env
+      POD_NAME: game-server-story-faction-outpost-atre-0
+      NODE_NAME: game-server-story-faction-outpost-atre-0
+    ports:
+      - "7792:7792/udp"
+
+  game-server-story-faction-outpost-hark:
+    <<: *on-demand-game-server
+    hostname: game-server-story-faction-outpost-hark-0
+    command:
+      - /home/dune/run.sh
+      - Story_Faction_Outpost_Hark
+      - -FarmRegion=${WORLD_REGION}
+      - -ini:engine:[OnlineSubsystem]:ServerName=${WORLD_UNIQUE_NAME}
+      - -ini:engine:[FuncomLiveServices]:ServiceAuthToken=${FLS_TOKEN}
+      - -ini:game:[DuneDatabaseInterfacePSQL]:DatabasePassword=${POSTGRES_DUNE_PASS}
+      - -RMQGameTlsEnabled=true
+      - --RMQGameHostname=rabbitmq-game
+      - --RMQGamePort=5672
+      - --RMQAdminHostname=rabbitmq-admin
+      - --RMQAdminPort=5672
+      - -ExternalAddress=${HOST_IP}
+      - -ini:engine:[URL]:Port=7793
+      - -ini:engine:[URL]:IGWPort=7904
+      - -PartitionIndex=17
+      - -log
+    environment:
+      <<: *game-server-env
+      POD_NAME: game-server-story-faction-outpost-hark-0
+      NODE_NAME: game-server-story-faction-outpost-hark-0
+    ports:
+      - "7793:7793/udp"
+
+  game-server-story-heighlinerdungeon:
+    <<: *on-demand-game-server
+    hostname: game-server-story-heighlinerdungeon-0
+    command:
+      - /home/dune/run.sh
+      - Story_HeighlinerDungeon
+      - -FarmRegion=${WORLD_REGION}
+      - -ini:engine:[OnlineSubsystem]:ServerName=${WORLD_UNIQUE_NAME}
+      - -ini:engine:[FuncomLiveServices]:ServiceAuthToken=${FLS_TOKEN}
+      - -ini:game:[DuneDatabaseInterfacePSQL]:DatabasePassword=${POSTGRES_DUNE_PASS}
+      - -RMQGameTlsEnabled=true
+      - --RMQGameHostname=rabbitmq-game
+      - --RMQGamePort=5672
+      - --RMQAdminHostname=rabbitmq-admin
+      - --RMQAdminPort=5672
+      - -ExternalAddress=${HOST_IP}
+      - -ini:engine:[URL]:Port=7794
+      - -ini:engine:[URL]:IGWPort=7905
+      - -PartitionIndex=18
+      - -log
+    environment:
+      <<: *game-server-env
+      POD_NAME: game-server-story-heighlinerdungeon-0
+      NODE_NAME: game-server-story-heighlinerdungeon-0
+    ports:
+      - "7794:7794/udp"
+
+  game-server-cb-ecolab-bronze-green-089:
+    <<: *on-demand-game-server
+    hostname: game-server-cb-ecolab-bronze-green-089-0
+    command:
+      - /home/dune/run.sh
+      - CB_Ecolab_Bronze_Green_089
+      - -FarmRegion=${WORLD_REGION}
+      - -ini:engine:[OnlineSubsystem]:ServerName=${WORLD_UNIQUE_NAME}
+      - -ini:engine:[FuncomLiveServices]:ServiceAuthToken=${FLS_TOKEN}
+      - -ini:game:[DuneDatabaseInterfacePSQL]:DatabasePassword=${POSTGRES_DUNE_PASS}
+      - -RMQGameTlsEnabled=true
+      - --RMQGameHostname=rabbitmq-game
+      - --RMQGamePort=5672
+      - --RMQAdminHostname=rabbitmq-admin
+      - --RMQAdminPort=5672
+      - -ExternalAddress=${HOST_IP}
+      - -ini:engine:[URL]:Port=7795
+      - -ini:engine:[URL]:IGWPort=7906
+      - -PartitionIndex=19
+      - -log
+    environment:
+      <<: *game-server-env
+      POD_NAME: game-server-cb-ecolab-bronze-green-089-0
+      NODE_NAME: game-server-cb-ecolab-bronze-green-089-0
+    ports:
+      - "7795:7795/udp"
+
+  game-server-cb-ecolab-bronze-green-152:
+    <<: *on-demand-game-server
+    hostname: game-server-cb-ecolab-bronze-green-152-0
+    command:
+      - /home/dune/run.sh
+      - CB_Ecolab_Bronze_Green_152
+      - -FarmRegion=${WORLD_REGION}
+      - -ini:engine:[OnlineSubsystem]:ServerName=${WORLD_UNIQUE_NAME}
+      - -ini:engine:[FuncomLiveServices]:ServiceAuthToken=${FLS_TOKEN}
+      - -ini:game:[DuneDatabaseInterfacePSQL]:DatabasePassword=${POSTGRES_DUNE_PASS}
+      - -RMQGameTlsEnabled=true
+      - --RMQGameHostname=rabbitmq-game
+      - --RMQGamePort=5672
+      - --RMQAdminHostname=rabbitmq-admin
+      - --RMQAdminPort=5672
+      - -ExternalAddress=${HOST_IP}
+      - -ini:engine:[URL]:Port=7796
+      - -ini:engine:[URL]:IGWPort=7907
+      - -PartitionIndex=20
+      - -log
+    environment:
+      <<: *game-server-env
+      POD_NAME: game-server-cb-ecolab-bronze-green-152-0
+      NODE_NAME: game-server-cb-ecolab-bronze-green-152-0
+    ports:
+      - "7796:7796/udp"
+
+  game-server-cb-ecolab-bronze-green-024:
+    <<: *on-demand-game-server
+    hostname: game-server-cb-ecolab-bronze-green-024-0
+    command:
+      - /home/dune/run.sh
+      - CB_Ecolab_Bronze_Green_024
+      - -FarmRegion=${WORLD_REGION}
+      - -ini:engine:[OnlineSubsystem]:ServerName=${WORLD_UNIQUE_NAME}
+      - -ini:engine:[FuncomLiveServices]:ServiceAuthToken=${FLS_TOKEN}
+      - -ini:game:[DuneDatabaseInterfacePSQL]:DatabasePassword=${POSTGRES_DUNE_PASS}
+      - -RMQGameTlsEnabled=true
+      - --RMQGameHostname=rabbitmq-game
+      - --RMQGamePort=5672
+      - --RMQAdminHostname=rabbitmq-admin
+      - --RMQAdminPort=5672
+      - -ExternalAddress=${HOST_IP}
+      - -ini:engine:[URL]:Port=7797
+      - -ini:engine:[URL]:IGWPort=7908
+      - -PartitionIndex=21
+      - -log
+    environment:
+      <<: *game-server-env
+      POD_NAME: game-server-cb-ecolab-bronze-green-024-0
+      NODE_NAME: game-server-cb-ecolab-bronze-green-024-0
+    ports:
+      - "7797:7797/udp"
+
+  game-server-cb-ecolab-bronze-green-195:
+    <<: *on-demand-game-server
+    hostname: game-server-cb-ecolab-bronze-green-195-0
+    command:
+      - /home/dune/run.sh
+      - CB_Ecolab_Bronze_Green_195
+      - -FarmRegion=${WORLD_REGION}
+      - -ini:engine:[OnlineSubsystem]:ServerName=${WORLD_UNIQUE_NAME}
+      - -ini:engine:[FuncomLiveServices]:ServiceAuthToken=${FLS_TOKEN}
+      - -ini:game:[DuneDatabaseInterfacePSQL]:DatabasePassword=${POSTGRES_DUNE_PASS}
+      - -RMQGameTlsEnabled=true
+      - --RMQGameHostname=rabbitmq-game
+      - --RMQGamePort=5672
+      - --RMQAdminHostname=rabbitmq-admin
+      - --RMQAdminPort=5672
+      - -ExternalAddress=${HOST_IP}
+      - -ini:engine:[URL]:Port=7798
+      - -ini:engine:[URL]:IGWPort=7909
+      - -PartitionIndex=22
+      - -log
+    environment:
+      <<: *game-server-env
+      POD_NAME: game-server-cb-ecolab-bronze-green-195-0
+      NODE_NAME: game-server-cb-ecolab-bronze-green-195-0
+    ports:
+      - "7798:7798/udp"
+
+  game-server-cb-ecolab-bronze-green-136:
+    <<: *on-demand-game-server
+    hostname: game-server-cb-ecolab-bronze-green-136-0
+    command:
+      - /home/dune/run.sh
+      - CB_Ecolab_Bronze_Green_136
+      - -FarmRegion=${WORLD_REGION}
+      - -ini:engine:[OnlineSubsystem]:ServerName=${WORLD_UNIQUE_NAME}
+      - -ini:engine:[FuncomLiveServices]:ServiceAuthToken=${FLS_TOKEN}
+      - -ini:game:[DuneDatabaseInterfacePSQL]:DatabasePassword=${POSTGRES_DUNE_PASS}
+      - -RMQGameTlsEnabled=true
+      - --RMQGameHostname=rabbitmq-game
+      - --RMQGamePort=5672
+      - --RMQAdminHostname=rabbitmq-admin
+      - --RMQAdminPort=5672
+      - -ExternalAddress=${HOST_IP}
+      - -ini:engine:[URL]:Port=7799
+      - -ini:engine:[URL]:IGWPort=7910
+      - -PartitionIndex=23
+      - -log
+    environment:
+      <<: *game-server-env
+      POD_NAME: game-server-cb-ecolab-bronze-green-136-0
+      NODE_NAME: game-server-cb-ecolab-bronze-green-136-0
+    ports:
+      - "7799:7799/udp"
+
+  game-server-cb-overland-m-01:
+    <<: *on-demand-game-server
+    hostname: game-server-cb-overland-m-01-0
+    command:
+      - /home/dune/run.sh
+      - CB_Overland_M_01
+      - -FarmRegion=${WORLD_REGION}
+      - -ini:engine:[OnlineSubsystem]:ServerName=${WORLD_UNIQUE_NAME}
+      - -ini:engine:[FuncomLiveServices]:ServiceAuthToken=${FLS_TOKEN}
+      - -ini:game:[DuneDatabaseInterfacePSQL]:DatabasePassword=${POSTGRES_DUNE_PASS}
+      - -RMQGameTlsEnabled=true
+      - --RMQGameHostname=rabbitmq-game
+      - --RMQGamePort=5672
+      - --RMQAdminHostname=rabbitmq-admin
+      - --RMQAdminPort=5672
+      - -ExternalAddress=${HOST_IP}
+      - -ini:engine:[URL]:Port=7800
+      - -ini:engine:[URL]:IGWPort=7911
+      - -PartitionIndex=24
+      - -log
+    environment:
+      <<: *game-server-env
+      POD_NAME: game-server-cb-overland-m-01-0
+      NODE_NAME: game-server-cb-overland-m-01-0
+    ports:
+      - "7800:7800/udp"
+
+  game-server-cb-overland-s-04:
+    <<: *on-demand-game-server
+    hostname: game-server-cb-overland-s-04-0
+    command:
+      - /home/dune/run.sh
+      - CB_Overland_S_04
+      - -FarmRegion=${WORLD_REGION}
+      - -ini:engine:[OnlineSubsystem]:ServerName=${WORLD_UNIQUE_NAME}
+      - -ini:engine:[FuncomLiveServices]:ServiceAuthToken=${FLS_TOKEN}
+      - -ini:game:[DuneDatabaseInterfacePSQL]:DatabasePassword=${POSTGRES_DUNE_PASS}
+      - -RMQGameTlsEnabled=true
+      - --RMQGameHostname=rabbitmq-game
+      - --RMQGamePort=5672
+      - --RMQAdminHostname=rabbitmq-admin
+      - --RMQAdminPort=5672
+      - -ExternalAddress=${HOST_IP}
+      - -ini:engine:[URL]:Port=7801
+      - -ini:engine:[URL]:IGWPort=7912
+      - -PartitionIndex=25
+      - -log
+    environment:
+      <<: *game-server-env
+      POD_NAME: game-server-cb-overland-s-04-0
+      NODE_NAME: game-server-cb-overland-s-04-0
+    ports:
+      - "7801:7801/udp"
+
+  game-server-cb-overland-s-06:
+    <<: *on-demand-game-server
+    hostname: game-server-cb-overland-s-06-0
+    command:
+      - /home/dune/run.sh
+      - CB_Overland_S_06
+      - -FarmRegion=${WORLD_REGION}
+      - -ini:engine:[OnlineSubsystem]:ServerName=${WORLD_UNIQUE_NAME}
+      - -ini:engine:[FuncomLiveServices]:ServiceAuthToken=${FLS_TOKEN}
+      - -ini:game:[DuneDatabaseInterfacePSQL]:DatabasePassword=${POSTGRES_DUNE_PASS}
+      - -RMQGameTlsEnabled=true
+      - --RMQGameHostname=rabbitmq-game
+      - --RMQGamePort=5672
+      - --RMQAdminHostname=rabbitmq-admin
+      - --RMQAdminPort=5672
+      - -ExternalAddress=${HOST_IP}
+      - -ini:engine:[URL]:Port=7802
+      - -ini:engine:[URL]:IGWPort=7913
+      - -PartitionIndex=26
+      - -log
+    environment:
+      <<: *game-server-env
+      POD_NAME: game-server-cb-overland-s-06-0
+      NODE_NAME: game-server-cb-overland-s-06-0
+    ports:
+      - "7802:7802/udp"
+
+  game-server-cb-story-banditfortress01:
+    <<: *on-demand-game-server
+    hostname: game-server-cb-story-banditfortress01-0
+    command:
+      - /home/dune/run.sh
+      - CB_Story_BanditFortress01
+      - -FarmRegion=${WORLD_REGION}
+      - -ini:engine:[OnlineSubsystem]:ServerName=${WORLD_UNIQUE_NAME}
+      - -ini:engine:[FuncomLiveServices]:ServiceAuthToken=${FLS_TOKEN}
+      - -ini:game:[DuneDatabaseInterfacePSQL]:DatabasePassword=${POSTGRES_DUNE_PASS}
+      - -RMQGameTlsEnabled=true
+      - --RMQGameHostname=rabbitmq-game
+      - --RMQGamePort=5672
+      - --RMQAdminHostname=rabbitmq-admin
+      - --RMQAdminPort=5672
+      - -ExternalAddress=${HOST_IP}
+      - -ini:engine:[URL]:Port=7803
+      - -ini:engine:[URL]:IGWPort=7914
+      - -PartitionIndex=27
+      - -log
+    environment:
+      <<: *game-server-env
+      POD_NAME: game-server-cb-story-banditfortress01-0
+      NODE_NAME: game-server-cb-story-banditfortress01-0
+    ports:
+      - "7803:7803/udp"
+
+  game-server-cb-overland-s-07:
+    <<: *on-demand-game-server
+    hostname: game-server-cb-overland-s-07-0
+    command:
+      - /home/dune/run.sh
+      - CB_Overland_S_07
+      - -FarmRegion=${WORLD_REGION}
+      - -ini:engine:[OnlineSubsystem]:ServerName=${WORLD_UNIQUE_NAME}
+      - -ini:engine:[FuncomLiveServices]:ServiceAuthToken=${FLS_TOKEN}
+      - -ini:game:[DuneDatabaseInterfacePSQL]:DatabasePassword=${POSTGRES_DUNE_PASS}
+      - -RMQGameTlsEnabled=true
+      - --RMQGameHostname=rabbitmq-game
+      - --RMQGamePort=5672
+      - --RMQAdminHostname=rabbitmq-admin
+      - --RMQAdminPort=5672
+      - -ExternalAddress=${HOST_IP}
+      - -ini:engine:[URL]:Port=7804
+      - -ini:engine:[URL]:IGWPort=7915
+      - -PartitionIndex=28
+      - -log
+    environment:
+      <<: *game-server-env
+      POD_NAME: game-server-cb-overland-s-07-0
+      NODE_NAME: game-server-cb-overland-s-07-0
+    ports:
+      - "7804:7804/udp"
+
+  game-server-cb-overland-s-08:
+    <<: *on-demand-game-server
+    hostname: game-server-cb-overland-s-08-0
+    command:
+      - /home/dune/run.sh
+      - CB_Overland_S_08
+      - -FarmRegion=${WORLD_REGION}
+      - -ini:engine:[OnlineSubsystem]:ServerName=${WORLD_UNIQUE_NAME}
+      - -ini:engine:[FuncomLiveServices]:ServiceAuthToken=${FLS_TOKEN}
+      - -ini:game:[DuneDatabaseInterfacePSQL]:DatabasePassword=${POSTGRES_DUNE_PASS}
+      - -RMQGameTlsEnabled=true
+      - --RMQGameHostname=rabbitmq-game
+      - --RMQGamePort=5672
+      - --RMQAdminHostname=rabbitmq-admin
+      - --RMQAdminPort=5672
+      - -ExternalAddress=${HOST_IP}
+      - -ini:engine:[URL]:Port=7805
+      - -ini:engine:[URL]:IGWPort=7916
+      - -PartitionIndex=29
+      - -log
+    environment:
+      <<: *game-server-env
+      POD_NAME: game-server-cb-overland-s-08-0
+      NODE_NAME: game-server-cb-overland-s-08-0
+    ports:
+      - "7805:7805/udp"
+
+  game-server-cb-dungeon-thepit:
+    <<: *on-demand-game-server
+    hostname: game-server-cb-dungeon-thepit-0
+    command:
+      - /home/dune/run.sh
+      - CB_Dungeon_ThePit
+      - -FarmRegion=${WORLD_REGION}
+      - -ini:engine:[OnlineSubsystem]:ServerName=${WORLD_UNIQUE_NAME}
+      - -ini:engine:[FuncomLiveServices]:ServiceAuthToken=${FLS_TOKEN}
+      - -ini:game:[DuneDatabaseInterfacePSQL]:DatabasePassword=${POSTGRES_DUNE_PASS}
+      - -RMQGameTlsEnabled=true
+      - --RMQGameHostname=rabbitmq-game
+      - --RMQGamePort=5672
+      - --RMQAdminHostname=rabbitmq-admin
+      - --RMQAdminPort=5672
+      - -ExternalAddress=${HOST_IP}
+      - -ini:engine:[URL]:Port=7806
+      - -ini:engine:[URL]:IGWPort=7917
+      - -PartitionIndex=30
+      - -log
+    environment:
+      <<: *game-server-env
+      POD_NAME: game-server-cb-dungeon-thepit-0
+      NODE_NAME: game-server-cb-dungeon-thepit-0
+    ports:
+      - "7806:7806/udp"
+volumes:
+  postgres-data:
+  filebrowser-data:
+  postgres-backups:

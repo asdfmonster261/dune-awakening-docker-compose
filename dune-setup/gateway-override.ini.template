@@ -1,0 +1,44 @@
+; Gateway override — mounted at /etc/app/conf.d/gateway.ini.
+; setup.sh substitutes {PLACEHOLDERS} from .env to produce gateway-override.ini.
+; Layered on top of the baked-in /Tools/Battlegroups/GatewayService/service/configs/service.conf.
+
+[DuneDatabaseInterfacePSQL]
+DatabaseHost     = postgres:5432
+DatabaseName     = dune
+DatabaseUser     = dune
+DatabasePassword = {POSTGRES_DUNE_PASS}
+
+[gateway]
+; title → battlegroup.title → DisplayName field sent to FLS.
+; (display_name is a registered setting but get_battlegroup_id() does NOT read it;
+;  see [OnlineSubsystem].ServerName below — that's the actual BattlegroupId source.)
+display_name              = {WORLD_UNIQUE_NAME}
+title                     = {WORLD_NAME}
+farm_api_key              = {FLS_API_KEY}
+host_datacenter_id        = {HOST_DATACENTER_ID}
+host_datacenter_ip_address = {HOST_IP}
+admin_rmq_hostname        = rabbitmq-admin
+admin_rmq_port            = 5672
+game_rmq_hostname         = {HOST_IP}
+game_rmq_port             = 31982
+game_rmq_http_port        = 15672
+game_rmq_secret           = {RMQ_HTTP_TOKEN_AUTH_SECRET}
+battlegroup_language      = en-US
+
+[OnlineSubsystem]
+; ServerName → battlegroup.id → BattlegroupId field sent to FLS.
+; get_battlegroup_id() reads this; without it, the gateway falls back to
+; LOCAL-{container_hostname}-{user} (e.g. LOCAL-D6EBB01C37D3-ROOT).
+ServerName   = {WORLD_UNIQUE_NAME}
+DatacenterId = {WORLD_REGION}
+
+[FuncomLiveServices]
+ServiceAuthToken               = {FLS_TOKEN}
+RmqTlsEnabled                  = true
+BattlegroupAuthorizationPreset = BattlegroupInternal
+
+[build]
+; Must match the game-server image build (the binary reports this to the
+; gateway when it comes up). The K8s world-template.yaml has a stale 1862600
+; from an older release; use the current image tag suffix instead.
+revision = 1968181

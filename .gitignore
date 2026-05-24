@@ -1,0 +1,26 @@
+# Secrets — never commit
+.env
+.env.local
+dune-setup/certs/
+dune-setup/orchestrator/serviceaccount/
+
+# Rendered configs (have credentials substituted in)
+dune-setup/gateway-override.ini
+dune-setup/orchestrator/world.yaml
+
+# Funcom-provided artifacts (download via setup.sh / Steam — not redistributable)
+server/
+
+# Reverse-engineering notes — local only
+ANALYSIS.md
+research/
+
+# Compiled binaries
+dune-setup/orchestrator/dune-orchestrator
+
+# Editor / OS junk
+.DS_Store
+*.swp
+*~
+.idea/
+.vscode/
