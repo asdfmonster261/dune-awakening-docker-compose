@@ -2,9 +2,15 @@
 # Interactive setup: gather inputs, generate secrets/certs, load images, render configs.
 # Writes .env at the repo root for docker-compose to consume.
 #
-# pipefail is intentionally omitted: the `tr -dc … </dev/urandom | head -c N` pattern
-# in generate_secrets SIGPIPEs the upstream tr, which under pipefail returns 141 and
-# `set -e` would kill the script silently right after the assignment.
+# Safe to re-run: when .env already exists, defaults to "update mode" which
+# preserves the load-bearing secrets (passwords, FLS token, battlegroup ID)
+# and only re-renders the derived config files. A full reset is opt-in and
+# warns about data loss.
+#
+# pipefail is intentionally omitted: the `tr -dc … </dev/urandom | head -c N`
+# pattern in generate_secrets SIGPIPEs the upstream tr, which under pipefail
+# returns 141 and `set -e` would kill the script silently right after the
+# assignment.
 set -eu
 
 G_SCRIPT_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -12,6 +18,10 @@ REPO_ROOT="$(cd "$G_SCRIPT_PATH/.." && pwd)"
 ENV_FILE="$REPO_ROOT/.env"
 
 RED=$'\033[31m'; GREEN=$'\033[32m'; YELLOW=$'\033[33m'; NC=$'\033[0m'
+
+# MODE is set by choose_mode: "fresh" (no .env yet), "update" (preserve secrets),
+# or "reset" (regenerate everything — data loss warning was acknowledged).
+MODE="fresh"
 
 require_cmd() {
     for c in "$@"; do
@@ -22,10 +32,87 @@ require_cmd() {
     done
 }
 
-prompt_world_name() {
+# ── Existing-install detection ──────────────────────────────────────────────
+
+load_existing_env() {
+    # Source the existing .env file into the current shell. Values are
+    # double-quoted on write, so word-splitting in space-containing values
+    # (e.g. WORLD_REGION="North America") is preserved.
+    # shellcheck disable=SC1090
+    . "$ENV_FILE"
+
+    # Defaults for fields that may be missing from older .env files.
+    BACKUP_INTERVAL_SECONDS="${BACKUP_INTERVAL_SECONDS:-3600}"
+    BACKUP_RETENTION="${BACKUP_RETENTION:-24}"
+
+    # Reconstruct FLS_PLAYER_ID from the existing WORLD_UNIQUE_NAME.
+    # Name format: sh-<player-id>-<6 random lowercase>.
+    if [ -n "${WORLD_UNIQUE_NAME:-}" ]; then
+        FLS_PLAYER_ID="${WORLD_UNIQUE_NAME#sh-}"
+        FLS_PLAYER_ID="${FLS_PLAYER_ID%-*}"
+    fi
+}
+
+choose_mode() {
+    echo
+    echo "${YELLOW}.env already exists at $ENV_FILE${NC}"
+    echo
+    echo "  [u] Update — preserve secrets (DB passwords, FLS token, battlegroup"
+    echo "       ID, RMQ secret); re-prompt only world name / display name /"
+    echo "       host IP / password. Re-renders derived config files."
+    echo
+    echo "  [r] ${RED}Full reset${NC} — regenerate all secrets. This will make the"
+    echo "       existing postgres data unreadable (passwords change) and"
+    echo "       re-register the battlegroup with FLS as a new server."
+    echo "       Existing characters will be lost."
+    echo
+    echo "  [a] Abort"
+    echo
     while true; do
-        read -r -p "World name shown in the server browser (1-50 chars): " WORLD_NAME
-        if [ -n "$WORLD_NAME" ] && [ "${#WORLD_NAME}" -le 50 ]; then
+        read -r -p "Choice [u/r/a]: " choice
+        case "$choice" in
+            ""|[uU]*)
+                MODE="update"
+                return
+                ;;
+            [rR]*)
+                echo
+                read -r -p "${RED}Confirm full reset? Type 'reset' to proceed: ${NC}" confirm
+                if [ "$confirm" = "reset" ]; then
+                    MODE="reset"
+                    return
+                fi
+                echo "Not confirmed; try again."
+                ;;
+            [aA]*)
+                echo "Aborted."
+                exit 0
+                ;;
+            *)
+                echo "Invalid choice."
+                ;;
+        esac
+    done
+}
+
+# ── Prompts ─────────────────────────────────────────────────────────────────
+
+prompt_world_name() {
+    local default="${WORLD_NAME:-}"
+    local prompt
+    if [ -n "$default" ]; then
+        prompt="World name (1-50 chars) [$default]: "
+    else
+        prompt="World name shown in the server browser (1-50 chars): "
+    fi
+    while true; do
+        read -r -p "$prompt" input
+        if [ -z "$input" ] && [ -n "$default" ]; then
+            WORLD_NAME="$default"
+            return
+        fi
+        if [ -n "$input" ] && [ "${#input}" -le 50 ]; then
+            WORLD_NAME="$input"
             return
         fi
         echo "${RED}Invalid name; must be 1–50 characters.${NC}"
@@ -67,29 +154,40 @@ prompt_fls_api_key() {
 }
 
 prompt_host_ip() {
-    local default_ip
-    default_ip=$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{print $7; exit}')
-    [ -z "$default_ip" ] && default_ip="127.0.0.1"
-    read -r -p "Public/LAN IP players will connect to [$default_ip]: " HOST_IP
-    HOST_IP="${HOST_IP:-$default_ip}"
+    local default_ip="${HOST_IP:-}"
+    if [ -z "$default_ip" ]; then
+        default_ip=$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{print $7; exit}')
+        [ -z "$default_ip" ] && default_ip="127.0.0.1"
+    fi
+    read -r -p "Public/LAN IP players will connect to [$default_ip]: " input
+    HOST_IP="${input:-$default_ip}"
 }
 
 prompt_display_name() {
-    read -r -p "Browser display name [$WORLD_NAME]: " BROWSER_DISPLAY_NAME
-    BROWSER_DISPLAY_NAME="${BROWSER_DISPLAY_NAME:-$WORLD_NAME}"
+    local default="${BROWSER_DISPLAY_NAME:-$WORLD_NAME}"
+    read -r -p "Browser display name [$default]: " input
+    BROWSER_DISPLAY_NAME="${input:-$default}"
 }
 
 prompt_browser_password() {
-    read -r -p "Optional server password (press enter for none): " BROWSER_PASSWORD
+    # Not stored in .env, so we have no default to show. Empty input leaves
+    # whatever is currently in UserEngine.ini untouched (apply_browser_display_name
+    # only patches when the variable is non-empty).
+    read -r -p "Optional server password (press enter to keep current/none): " BROWSER_PASSWORD
 }
 
+# ── Secret + identity generation ────────────────────────────────────────────
+
 generate_secrets() {
+    # Only runs in fresh + reset modes. Update mode preserves these from .env.
     WORLD_UNIQUE_NAME="sh-${FLS_PLAYER_ID}-$(tr -dc 'a-z' </dev/urandom | head -c 6)"
     HOST_DATACENTER_ID="dune-${WORLD_REGION// /_}"
     POSTGRES_SUPER_PASS=$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c 32)
     POSTGRES_DUNE_PASS=$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c 32)
     RMQ_HTTP_TOKEN_AUTH_SECRET=$(openssl rand 64 | base64 -w0)
 }
+
+# ── File rendering ──────────────────────────────────────────────────────────
 
 write_env_file() {
     # All values are double-quoted so that `source .env` works (a value like
@@ -120,8 +218,8 @@ BROWSER_DISPLAY_NAME="${BROWSER_DISPLAY_NAME}"
 # per hour with a 24-hour rolling window. After changing, re-create just
 # the sidecar so it picks up the new values:
 #   docker compose up -d --force-recreate postgres-backup
-BACKUP_INTERVAL_SECONDS="3600"
-BACKUP_RETENTION="24"
+BACKUP_INTERVAL_SECONDS="${BACKUP_INTERVAL_SECONDS}"
+BACKUP_RETENTION="${BACKUP_RETENTION}"
 EOF
     chmod 600 "$ENV_FILE"
     echo "${GREEN}Wrote $ENV_FILE${NC}"
@@ -141,7 +239,6 @@ apply_browser_display_name() {
 }
 
 render_gateway_override() {
-    # Substitute {PLACEHOLDERS} in the template using env vars we just generated.
     local src="$G_SCRIPT_PATH/gateway-override.ini.template"
     local dst="$G_SCRIPT_PATH/gateway-override.ini"
     sed \
@@ -165,6 +262,13 @@ generate_service_account() {
     # The orchestrator doesn't validate the token, but the K8s client libraries
     # need the files to exist and the CA to sign the orchestrator's TLS cert.
     local sa_dir="$G_SCRIPT_PATH/orchestrator/serviceaccount"
+    if [ "$MODE" = "update" ] && [ -d "$sa_dir" ] && [ -f "$sa_dir/token" ]; then
+        # Update namespace in case WORLD_UNIQUE_NAME changed (shouldn't in
+        # update mode, but cheap to keep in sync).
+        printf 'funcom-seabass-%s' "$WORLD_UNIQUE_NAME" > "$sa_dir/namespace"
+        echo "${GREEN}Service-account already exists; preserved token${NC}"
+        return
+    fi
     mkdir -p "$sa_dir"
     openssl rand -base64 48 | tr -d '\n' > "$sa_dir/token"
     printf 'funcom-seabass-%s' "$WORLD_UNIQUE_NAME" > "$sa_dir/namespace"
@@ -197,18 +301,9 @@ render_orchestrator_world() {
     echo "${GREEN}Rendered $dst${NC}"
 }
 
-main() {
-    require_cmd jq openssl docker ip
-    echo "${GREEN}Dune Awakening — Docker Compose setup${NC}"
+# ── Mode-aware orchestration ────────────────────────────────────────────────
 
-    if [ -f "$ENV_FILE" ]; then
-        read -r -p "${YELLOW}.env already exists. Overwrite? [y/N]: ${NC}" yn
-        case "$yn" in
-            [yY]*) ;;
-            *) echo "Aborted."; exit 0;;
-        esac
-    fi
-
+run_fresh_or_reset_prompts() {
     prompt_world_name
     prompt_world_region
     prompt_fls_token
@@ -216,22 +311,66 @@ main() {
     prompt_host_ip
     prompt_display_name
     prompt_browser_password
+    BACKUP_INTERVAL_SECONDS="${BACKUP_INTERVAL_SECONDS:-3600}"
+    BACKUP_RETENTION="${BACKUP_RETENTION:-24}"
+}
 
-    generate_secrets
+run_update_prompts() {
+    # Only the safe-to-change fields. Everything else stays exactly as it
+    # was loaded from .env.
+    prompt_world_name
+    prompt_host_ip
+    prompt_display_name
+    prompt_browser_password
+}
+
+maybe_generate_certs() {
+    local certs_dir="$G_SCRIPT_PATH/certs"
+    if [ "$MODE" = "update" ] && [ -d "$certs_dir" ] && [ -f "$certs_dir/cacert.pem" ]; then
+        echo "${GREEN}Certs already exist; skipping regeneration${NC}"
+        return
+    fi
+    "$G_SCRIPT_PATH/generate-certs.sh"
+}
+
+main() {
+    require_cmd jq openssl docker ip
+    echo "${GREEN}Dune Awakening — Docker Compose setup${NC}"
+
+    if [ -f "$ENV_FILE" ]; then
+        choose_mode
+        load_existing_env
+    fi
+
+    case "$MODE" in
+        fresh|reset)
+            run_fresh_or_reset_prompts
+            generate_secrets
+            ;;
+        update)
+            run_update_prompts
+            # Secrets preserved from load_existing_env.
+            ;;
+    esac
+
     write_env_file
     apply_browser_display_name
     render_gateway_override
 
-    "$G_SCRIPT_PATH/generate-certs.sh"
+    maybe_generate_certs
     generate_service_account
     render_orchestrator_world
     "$G_SCRIPT_PATH/load-images.sh"
 
     echo
-    echo "${GREEN}Setup complete.${NC}"
+    echo "${GREEN}Setup complete (mode: $MODE).${NC}"
     echo "Next:"
-    echo "  docker compose up -d                                    # start the always-on stack"
-    echo "  docker compose --profile on-demand create               # materialize the 28 on-demand maps (stopped)"
+    if [ "$MODE" = "update" ]; then
+        echo "  docker compose up -d --force-recreate                   # apply config changes"
+    else
+        echo "  docker compose up -d                                    # start the always-on stack"
+        echo "  docker compose --profile on-demand create               # materialize the 28 on-demand maps (stopped)"
+    fi
     echo "  docker compose logs -f                                  # tail logs"
     echo "  docker compose down                                     # stop"
 }
