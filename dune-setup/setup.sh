@@ -297,6 +297,13 @@ render_orchestrator_world() {
         -e "s|{FLS_SECRET}|${FLS_TOKEN}|g" \
         -e "s|{RMQ_SECRET}|${RMQ_HTTP_TOKEN_AUTH_SECRET}|g" \
         "$src" > "$dst"
+
+    # Funcom's run.sh in the game-server image collapses argv to a string via
+    # `echo "$@"` and re-parses through `su -c`. Any cmdline arg with a space
+    # gets word-split there — `-FarmRegion=North America` becomes two args,
+    # the map URL load fails, and the server requests exit during init.
+    # Wrap the value in double quotes so the inner shell preserves it.
+    sed -i -E 's|(- -FarmRegion=)([^"][^"]*[^"])$|\1"\2"|' "$dst"
     chmod 644 "$dst"
     echo "${GREEN}Rendered $dst${NC}"
 }

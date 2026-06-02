@@ -440,7 +440,7 @@ services:
       - /home/dune/run.sh
       # No positional map arg — Survival_1 is the ServerDefaultMap baked into
       # DefaultEngine.ini, so the binary loads it by default.
-      - -FarmRegion=${WORLD_REGION}
+      - '-FarmRegion="${WORLD_REGION}"'
       # ServerName pins every game-server in this battlegroup to the same
       # OnlineSubsystem identity, so S2S peers accept each other's handshake.
       # Without it each server falls back to LOCAL-<hostname>-<user> and the
@@ -492,7 +492,7 @@ services:
       # flags come between project and URL, UE treats the project itself as the
       # URL and falls back to ServerDefaultMap.
       - Overmap
-      - -FarmRegion=${WORLD_REGION}
+      - '-FarmRegion="${WORLD_REGION}"'
       - -ini:engine:[OnlineSubsystem]:ServerName=${WORLD_UNIQUE_NAME}
       - -ini:engine:[FuncomLiveServices]:ServiceAuthToken=${FLS_TOKEN}
       - -ini:game:[DuneDatabaseInterfacePSQL]:DatabasePassword=${POSTGRES_DUNE_PASS}
@@ -539,7 +539,7 @@ services:
     command:
       - /home/dune/run.sh
       - SH_Arrakeen
-      - -FarmRegion=${WORLD_REGION}
+      - '-FarmRegion="${WORLD_REGION}"'
       - -ini:engine:[OnlineSubsystem]:ServerName=${WORLD_UNIQUE_NAME}
       - -ini:engine:[FuncomLiveServices]:ServiceAuthToken=${FLS_TOKEN}
       - -ini:game:[DuneDatabaseInterfacePSQL]:DatabasePassword=${POSTGRES_DUNE_PASS}
@@ -566,7 +566,7 @@ services:
     command:
       - /home/dune/run.sh
       - SH_HarkoVillage
-      - -FarmRegion=${WORLD_REGION}
+      - '-FarmRegion="${WORLD_REGION}"'
       - -ini:engine:[OnlineSubsystem]:ServerName=${WORLD_UNIQUE_NAME}
       - -ini:engine:[FuncomLiveServices]:ServiceAuthToken=${FLS_TOKEN}
       - -ini:game:[DuneDatabaseInterfacePSQL]:DatabasePassword=${POSTGRES_DUNE_PASS}
@@ -593,7 +593,7 @@ services:
     command:
       - /home/dune/run.sh
       - CB_Story_Hephaestus
-      - -FarmRegion=${WORLD_REGION}
+      - '-FarmRegion="${WORLD_REGION}"'
       - -ini:engine:[OnlineSubsystem]:ServerName=${WORLD_UNIQUE_NAME}
       - -ini:engine:[FuncomLiveServices]:ServiceAuthToken=${FLS_TOKEN}
       - -ini:game:[DuneDatabaseInterfacePSQL]:DatabasePassword=${POSTGRES_DUNE_PASS}
@@ -620,7 +620,7 @@ services:
     command:
       - /home/dune/run.sh
       - CB_Story_Ecolab_Carthag
-      - -FarmRegion=${WORLD_REGION}
+      - '-FarmRegion="${WORLD_REGION}"'
       - -ini:engine:[OnlineSubsystem]:ServerName=${WORLD_UNIQUE_NAME}
       - -ini:engine:[FuncomLiveServices]:ServiceAuthToken=${FLS_TOKEN}
       - -ini:game:[DuneDatabaseInterfacePSQL]:DatabasePassword=${POSTGRES_DUNE_PASS}
@@ -647,7 +647,7 @@ services:
     command:
       - /home/dune/run.sh
       - CB_Story_WaterFatManor
-      - -FarmRegion=${WORLD_REGION}
+      - '-FarmRegion="${WORLD_REGION}"'
       - -ini:engine:[OnlineSubsystem]:ServerName=${WORLD_UNIQUE_NAME}
       - -ini:engine:[FuncomLiveServices]:ServiceAuthToken=${FLS_TOKEN}
       - -ini:game:[DuneDatabaseInterfacePSQL]:DatabasePassword=${POSTGRES_DUNE_PASS}
@@ -674,7 +674,7 @@ services:
     command:
       - /home/dune/run.sh
       - DeepDesert_1
-      - -FarmRegion=${WORLD_REGION}
+      - '-FarmRegion="${WORLD_REGION}"'
       - -ini:engine:[OnlineSubsystem]:ServerName=${WORLD_UNIQUE_NAME}
       - -ini:engine:[FuncomLiveServices]:ServiceAuthToken=${FLS_TOKEN}
       - -ini:game:[DuneDatabaseInterfacePSQL]:DatabasePassword=${POSTGRES_DUNE_PASS}
@@ -701,7 +701,7 @@ services:
     command:
       - /home/dune/run.sh
       - Story_ProcesVerbal
-      - -FarmRegion=${WORLD_REGION}
+      - '-FarmRegion="${WORLD_REGION}"'
       - -ini:engine:[OnlineSubsystem]:ServerName=${WORLD_UNIQUE_NAME}
       - -ini:engine:[FuncomLiveServices]:ServiceAuthToken=${FLS_TOKEN}
       - -ini:game:[DuneDatabaseInterfacePSQL]:DatabasePassword=${POSTGRES_DUNE_PASS}
@@ -728,7 +728,7 @@ services:
     command:
       - /home/dune/run.sh
       - DLC_Story_LostHarvest_EcolabA
-      - -FarmRegion=${WORLD_REGION}
+      - '-FarmRegion="${WORLD_REGION}"'
       - -ini:engine:[OnlineSubsystem]:ServerName=${WORLD_UNIQUE_NAME}
       - -ini:engine:[FuncomLiveServices]:ServiceAuthToken=${FLS_TOKEN}
       - -ini:game:[DuneDatabaseInterfacePSQL]:DatabasePassword=${POSTGRES_DUNE_PASS}
@@ -755,7 +755,7 @@ services:
     command:
       - /home/dune/run.sh
       - DLC_Story_LostHarvest_EcolabB
-      - -FarmRegion=${WORLD_REGION}
+      - '-FarmRegion="${WORLD_REGION}"'
       - -ini:engine:[OnlineSubsystem]:ServerName=${WORLD_UNIQUE_NAME}
       - -ini:engine:[FuncomLiveServices]:ServiceAuthToken=${FLS_TOKEN}
       - -ini:game:[DuneDatabaseInterfacePSQL]:DatabasePassword=${POSTGRES_DUNE_PASS}
@@ -782,7 +782,7 @@ services:
     command:
       - /home/dune/run.sh
       - DLC_Story_LostHarvest_ForgottenLab
-      - -FarmRegion=${WORLD_REGION}
+      - '-FarmRegion="${WORLD_REGION}"'
       - -ini:engine:[OnlineSubsystem]:ServerName=${WORLD_UNIQUE_NAME}
       - -ini:engine:[FuncomLiveServices]:ServiceAuthToken=${FLS_TOKEN}
       - -ini:game:[DuneDatabaseInterfacePSQL]:DatabasePassword=${POSTGRES_DUNE_PASS}
@@ -809,7 +809,7 @@ services:
     command:
       - /home/dune/run.sh
       - Story_ArtOfKanly
-      - -FarmRegion=${WORLD_REGION}
+      - '-FarmRegion="${WORLD_REGION}"'
       - -ini:engine:[OnlineSubsystem]:ServerName=${WORLD_UNIQUE_NAME}
       - -ini:engine:[FuncomLiveServices]:ServiceAuthToken=${FLS_TOKEN}
       - -ini:game:[DuneDatabaseInterfacePSQL]:DatabasePassword=${POSTGRES_DUNE_PASS}
@@ -836,7 +836,7 @@ services:
     command:
       - /home/dune/run.sh
       - CB_Dungeon_Hephaestus
-      - -FarmRegion=${WORLD_REGION}
+      - '-FarmRegion="${WORLD_REGION}"'
       - -ini:engine:[OnlineSubsystem]:ServerName=${WORLD_UNIQUE_NAME}
       - -ini:engine:[FuncomLiveServices]:ServiceAuthToken=${FLS_TOKEN}
       - -ini:game:[DuneDatabaseInterfacePSQL]:DatabasePassword=${POSTGRES_DUNE_PASS}
@@ -863,7 +863,7 @@ services:
     command:
       - /home/dune/run.sh
       - CB_Dungeon_OldCarthag
-      - -FarmRegion=${WORLD_REGION}
+      - '-FarmRegion="${WORLD_REGION}"'
       - -ini:engine:[OnlineSubsystem]:ServerName=${WORLD_UNIQUE_NAME}
       - -ini:engine:[FuncomLiveServices]:ServiceAuthToken=${FLS_TOKEN}
       - -ini:game:[DuneDatabaseInterfacePSQL]:DatabasePassword=${POSTGRES_DUNE_PASS}
@@ -890,7 +890,7 @@ services:
     command:
       - /home/dune/run.sh
       - Story_Faction_Outpost_Atre
-      - -FarmRegion=${WORLD_REGION}
+      - '-FarmRegion="${WORLD_REGION}"'
       - -ini:engine:[OnlineSubsystem]:ServerName=${WORLD_UNIQUE_NAME}
       - -ini:engine:[FuncomLiveServices]:ServiceAuthToken=${FLS_TOKEN}
       - -ini:game:[DuneDatabaseInterfacePSQL]:DatabasePassword=${POSTGRES_DUNE_PASS}
@@ -917,7 +917,7 @@ services:
     command:
       - /home/dune/run.sh
       - Story_Faction_Outpost_Hark
-      - -FarmRegion=${WORLD_REGION}
+      - '-FarmRegion="${WORLD_REGION}"'
       - -ini:engine:[OnlineSubsystem]:ServerName=${WORLD_UNIQUE_NAME}
       - -ini:engine:[FuncomLiveServices]:ServiceAuthToken=${FLS_TOKEN}
       - -ini:game:[DuneDatabaseInterfacePSQL]:DatabasePassword=${POSTGRES_DUNE_PASS}
@@ -944,7 +944,7 @@ services:
     command:
       - /home/dune/run.sh
       - Story_HeighlinerDungeon
-      - -FarmRegion=${WORLD_REGION}
+      - '-FarmRegion="${WORLD_REGION}"'
       - -ini:engine:[OnlineSubsystem]:ServerName=${WORLD_UNIQUE_NAME}
       - -ini:engine:[FuncomLiveServices]:ServiceAuthToken=${FLS_TOKEN}
       - -ini:game:[DuneDatabaseInterfacePSQL]:DatabasePassword=${POSTGRES_DUNE_PASS}
@@ -971,7 +971,7 @@ services:
     command:
       - /home/dune/run.sh
       - CB_Ecolab_Bronze_Green_089
-      - -FarmRegion=${WORLD_REGION}
+      - '-FarmRegion="${WORLD_REGION}"'
       - -ini:engine:[OnlineSubsystem]:ServerName=${WORLD_UNIQUE_NAME}
       - -ini:engine:[FuncomLiveServices]:ServiceAuthToken=${FLS_TOKEN}
       - -ini:game:[DuneDatabaseInterfacePSQL]:DatabasePassword=${POSTGRES_DUNE_PASS}
@@ -998,7 +998,7 @@ services:
     command:
       - /home/dune/run.sh
       - CB_Ecolab_Bronze_Green_152
-      - -FarmRegion=${WORLD_REGION}
+      - '-FarmRegion="${WORLD_REGION}"'
       - -ini:engine:[OnlineSubsystem]:ServerName=${WORLD_UNIQUE_NAME}
       - -ini:engine:[FuncomLiveServices]:ServiceAuthToken=${FLS_TOKEN}
       - -ini:game:[DuneDatabaseInterfacePSQL]:DatabasePassword=${POSTGRES_DUNE_PASS}
@@ -1025,7 +1025,7 @@ services:
     command:
       - /home/dune/run.sh
       - CB_Ecolab_Bronze_Green_024
-      - -FarmRegion=${WORLD_REGION}
+      - '-FarmRegion="${WORLD_REGION}"'
       - -ini:engine:[OnlineSubsystem]:ServerName=${WORLD_UNIQUE_NAME}
       - -ini:engine:[FuncomLiveServices]:ServiceAuthToken=${FLS_TOKEN}
       - -ini:game:[DuneDatabaseInterfacePSQL]:DatabasePassword=${POSTGRES_DUNE_PASS}
@@ -1052,7 +1052,7 @@ services:
     command:
       - /home/dune/run.sh
       - CB_Ecolab_Bronze_Green_195
-      - -FarmRegion=${WORLD_REGION}
+      - '-FarmRegion="${WORLD_REGION}"'
       - -ini:engine:[OnlineSubsystem]:ServerName=${WORLD_UNIQUE_NAME}
       - -ini:engine:[FuncomLiveServices]:ServiceAuthToken=${FLS_TOKEN}
       - -ini:game:[DuneDatabaseInterfacePSQL]:DatabasePassword=${POSTGRES_DUNE_PASS}
@@ -1079,7 +1079,7 @@ services:
     command:
       - /home/dune/run.sh
       - CB_Ecolab_Bronze_Green_136
-      - -FarmRegion=${WORLD_REGION}
+      - '-FarmRegion="${WORLD_REGION}"'
       - -ini:engine:[OnlineSubsystem]:ServerName=${WORLD_UNIQUE_NAME}
       - -ini:engine:[FuncomLiveServices]:ServiceAuthToken=${FLS_TOKEN}
       - -ini:game:[DuneDatabaseInterfacePSQL]:DatabasePassword=${POSTGRES_DUNE_PASS}
@@ -1106,7 +1106,7 @@ services:
     command:
       - /home/dune/run.sh
       - CB_Overland_M_01
-      - -FarmRegion=${WORLD_REGION}
+      - '-FarmRegion="${WORLD_REGION}"'
       - -ini:engine:[OnlineSubsystem]:ServerName=${WORLD_UNIQUE_NAME}
       - -ini:engine:[FuncomLiveServices]:ServiceAuthToken=${FLS_TOKEN}
       - -ini:game:[DuneDatabaseInterfacePSQL]:DatabasePassword=${POSTGRES_DUNE_PASS}
@@ -1133,7 +1133,7 @@ services:
     command:
       - /home/dune/run.sh
       - CB_Overland_S_04
-      - -FarmRegion=${WORLD_REGION}
+      - '-FarmRegion="${WORLD_REGION}"'
       - -ini:engine:[OnlineSubsystem]:ServerName=${WORLD_UNIQUE_NAME}
       - -ini:engine:[FuncomLiveServices]:ServiceAuthToken=${FLS_TOKEN}
       - -ini:game:[DuneDatabaseInterfacePSQL]:DatabasePassword=${POSTGRES_DUNE_PASS}
@@ -1160,7 +1160,7 @@ services:
     command:
       - /home/dune/run.sh
       - CB_Overland_S_06
-      - -FarmRegion=${WORLD_REGION}
+      - '-FarmRegion="${WORLD_REGION}"'
       - -ini:engine:[OnlineSubsystem]:ServerName=${WORLD_UNIQUE_NAME}
       - -ini:engine:[FuncomLiveServices]:ServiceAuthToken=${FLS_TOKEN}
       - -ini:game:[DuneDatabaseInterfacePSQL]:DatabasePassword=${POSTGRES_DUNE_PASS}
@@ -1187,7 +1187,7 @@ services:
     command:
       - /home/dune/run.sh
       - CB_Story_BanditFortress01
-      - -FarmRegion=${WORLD_REGION}
+      - '-FarmRegion="${WORLD_REGION}"'
       - -ini:engine:[OnlineSubsystem]:ServerName=${WORLD_UNIQUE_NAME}
       - -ini:engine:[FuncomLiveServices]:ServiceAuthToken=${FLS_TOKEN}
       - -ini:game:[DuneDatabaseInterfacePSQL]:DatabasePassword=${POSTGRES_DUNE_PASS}
@@ -1214,7 +1214,7 @@ services:
     command:
       - /home/dune/run.sh
       - CB_Overland_S_07
-      - -FarmRegion=${WORLD_REGION}
+      - '-FarmRegion="${WORLD_REGION}"'
       - -ini:engine:[OnlineSubsystem]:ServerName=${WORLD_UNIQUE_NAME}
       - -ini:engine:[FuncomLiveServices]:ServiceAuthToken=${FLS_TOKEN}
       - -ini:game:[DuneDatabaseInterfacePSQL]:DatabasePassword=${POSTGRES_DUNE_PASS}
@@ -1241,7 +1241,7 @@ services:
     command:
       - /home/dune/run.sh
       - CB_Overland_S_08
-      - -FarmRegion=${WORLD_REGION}
+      - '-FarmRegion="${WORLD_REGION}"'
       - -ini:engine:[OnlineSubsystem]:ServerName=${WORLD_UNIQUE_NAME}
       - -ini:engine:[FuncomLiveServices]:ServiceAuthToken=${FLS_TOKEN}
       - -ini:game:[DuneDatabaseInterfacePSQL]:DatabasePassword=${POSTGRES_DUNE_PASS}
@@ -1268,7 +1268,7 @@ services:
     command:
       - /home/dune/run.sh
       - CB_Dungeon_ThePit
-      - -FarmRegion=${WORLD_REGION}
+      - '-FarmRegion="${WORLD_REGION}"'
       - -ini:engine:[OnlineSubsystem]:ServerName=${WORLD_UNIQUE_NAME}
       - -ini:engine:[FuncomLiveServices]:ServiceAuthToken=${FLS_TOKEN}
       - -ini:game:[DuneDatabaseInterfacePSQL]:DatabasePassword=${POSTGRES_DUNE_PASS}
