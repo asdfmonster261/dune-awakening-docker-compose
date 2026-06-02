@@ -168,6 +168,67 @@ restart_stack() {
     dc up -d
 }
 
+# Promote the files we actually need from .updates/ into server/ and delete
+# the rest. Run after verify succeeds. Wrapped in `|| true` so cleanup failures
+# don't poison a successful apply.
+cleanup_after_apply() {
+    if [ "${NO_CLEAN:-}" = "1" ]; then
+        echo "Skipping cleanup (--no-clean / NO_CLEAN=1)"
+        return
+    fi
+    echo "Cleaning up..."
+
+    # 1) Promote metadata + the battlegroup tarballs (the latter are insurance
+    #    so an operator can re-`docker load` without re-running steamcmd).
+    mkdir -p "$SERVER_PATH/images/battlegroup" \
+             "$SERVER_PATH/images/operators" \
+             "$SERVER_PATH/images/prerequisites" \
+             "$SERVER_PATH/scripts/setup/templates"
+
+    cp -f "$STAGING_PATH/images/battlegroup/version.txt" \
+          "$SERVER_PATH/images/battlegroup/version.txt" 2>/dev/null || true
+    cp -f "$STAGING_PATH/images/operators/version.txt" \
+          "$SERVER_PATH/images/operators/version.txt" 2>/dev/null || true
+    cp -rf "$STAGING_PATH/images/battlegroup/"*.tar \
+          "$SERVER_PATH/images/battlegroup/" 2>/dev/null || true
+    cp -f "$STAGING_PATH/images/prerequisites/igw-postgres.tar" \
+          "$SERVER_PATH/images/prerequisites/igw-postgres.tar" 2>/dev/null || true
+    cp -rf "$STAGING_PATH/scripts/setup/templates/"* \
+          "$SERVER_PATH/scripts/setup/templates/" 2>/dev/null || true
+
+    # 2) Nuke staging entirely — we have what we need in server/.
+    rm -rf "$STAGING_PATH" 2>/dev/null || true
+
+    # 3) Prune unused stuff in server/ that's been around since the first
+    #    install (or got carried over from a prior promote).
+    #    Operators: never `docker load`ed — our orchestrator emulates them.
+    find "$SERVER_PATH/images/operators" -maxdepth 1 -name '*.tar' -delete 2>/dev/null || true
+    rm -rf "$SERVER_PATH/images/operators/crds" 2>/dev/null || true
+    #    Prerequisites: only igw-postgres.tar is used; the rest are k3s plumbing.
+    find "$SERVER_PATH/images/prerequisites" -maxdepth 1 -name '*.tar' \
+        -not -name 'igw-postgres.tar' -delete 2>/dev/null || true
+    #    Funcom installer scripts: keep only the templates/ dir setup.sh uses.
+    if [ -d "$SERVER_PATH/scripts" ]; then
+        find "$SERVER_PATH/scripts" -mindepth 1 -maxdepth 1 \
+            -not -name 'setup' -exec rm -rf {} + 2>/dev/null || true
+        if [ -d "$SERVER_PATH/scripts/setup" ]; then
+            find "$SERVER_PATH/scripts/setup" -mindepth 1 -maxdepth 1 \
+                -not -name 'templates' -exec rm -rf {} + 2>/dev/null || true
+        fi
+    fi
+    #    Steam metadata: not needed at runtime.
+    rm -rf "$SERVER_PATH/steamapps" 2>/dev/null || true
+
+    # 4) Drop the compose backup — git history has the diff and the rollback
+    #    path reads $COMPOSE_FILE.bak only if present, so leaving it would
+    #    confuse a future rollback after a *subsequent* apply succeeded.
+    rm -f "$COMPOSE_FILE.bak" 2>/dev/null || true
+
+    local size
+    size=$(du -sh "$SERVER_PATH" 2>/dev/null | awk '{print $1}')
+    echo "${GREEN}Cleanup done (server/: $size)${NC}"
+}
+
 verify() {
     local timeout="${1:-180}"
     local elapsed=0
@@ -276,6 +337,14 @@ cmd_check() {
 cmd_apply() {
     require_cmd steamcmd docker
 
+    # Parse flags. Currently only --no-clean.
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --no-clean) NO_CLEAN=1; shift ;;
+            *) echo "Unknown flag: $1" >&2; exit 1 ;;
+        esac
+    done
+
     # Reuse cmd_check for download + summary. cmd_check returns 1 when an
     # update is available; treat that as success here.
     local check_rc=0
@@ -313,7 +382,7 @@ cmd_apply() {
         echo "${GREEN}✓ Update applied successfully${NC}"
         echo "  ${current} → ${new}"
         echo "  Pre-update backup: $PRE_UPDATE_SNAPSHOT"
-        echo "  Old compose: ${COMPOSE_FILE}.bak (delete when satisfied)"
+        cleanup_after_apply
     else
         pause_for_rollback "$current" "$new"
     fi
@@ -392,19 +461,21 @@ cmd_rollback() {
 main() {
     case "${1:-}" in
         check)    cmd_check ;;
-        apply)    cmd_apply ;;
+        apply)    shift; cmd_apply "$@" ;;
         verify)   shift; cmd_verify "$@" ;;
         rollback) cmd_rollback ;;
         ""|-h|--help|help)
             cat <<EOF
 Usage: $0 {check|apply|verify|rollback}
 
-  check     Download latest from Steam, report version delta. No changes.
-  apply     check + pre-update DB backup + docker load + compose tag swap +
-            restart + verify. Pauses with rollback prompt on verify failure.
-  verify    Re-run the post-update health checks (useful when boots are slow).
-  rollback  Revert to the previous tag and restore the pre-update DB snapshot.
-            Uses state recorded in ${STATE_FILE}.
+  check               Download latest from Steam, report version delta. No changes.
+  apply [--no-clean]  check + pre-update DB backup + docker load + compose tag swap +
+                      restart + verify. Pauses with rollback prompt on verify failure.
+                      On success, prunes unused tarballs / Funcom installer scripts /
+                      Steam metadata from server/ (pass --no-clean to keep them).
+  verify              Re-run the post-update health checks (useful when boots are slow).
+  rollback            Revert to the previous tag and restore the pre-update DB snapshot.
+                      Uses state recorded in ${STATE_FILE}.
 EOF
             ;;
         *)
