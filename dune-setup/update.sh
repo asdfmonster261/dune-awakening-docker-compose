@@ -161,6 +161,40 @@ update_compose_tags() {
     sed -i -E "s|(registry\\.funcom\\.com/funcom/self-hosting/[^:]+):${current}|\\1:${new}|g" \
         "$COMPOSE_FILE"
     echo "${GREEN}Compose tags updated (backup: ${COMPOSE_FILE}.bak)${NC}"
+
+    # Two more places have the version baked in. If we skip these, the
+    # gateway registers the battlegroup with FLS at the old revision and
+    # rejects the new game-servers as "mismatching revision".
+    bump_version_sidecars "$current" "$new"
+}
+
+# The gateway reads `revision` from gateway-override.ini at startup and
+# reports it to FLS; the orchestrator-managed pods use the image tags in
+# world.yaml. Both files are RENDERED at install time and never
+# regenerated, so update.sh has to patch them in place.
+#
+# Tags here look like '1968181-0-shipping'. gateway-override.ini's
+# revision key uses just the numeric prefix; world.yaml uses the full tag.
+bump_version_sidecars() {
+    local current="$1" new="$2"
+    local current_rev="${current%%-*}"
+    local new_rev="${new%%-*}"
+
+    local gw_ini="$G_SCRIPT_PATH/gateway-override.ini"
+    if [ -f "$gw_ini" ]; then
+        cp "$gw_ini" "$gw_ini.bak"
+        sed -i -E "s|^(revision[[:space:]]*=[[:space:]]*)${current_rev}\$|\\1${new_rev}|" "$gw_ini"
+        echo "${GREEN}gateway-override.ini revision: ${current_rev} → ${new_rev}${NC}"
+    fi
+
+    local world_yaml="$G_SCRIPT_PATH/orchestrator/world.yaml"
+    if [ -f "$world_yaml" ]; then
+        cp "$world_yaml" "$world_yaml.bak"
+        sed -i -E "s|(funcom/self-hosting/[a-z-]+):${current}|\\1:${new}|g" "$world_yaml"
+        local cnt
+        cnt=$(grep -c "${new}" "$world_yaml" || echo 0)
+        echo "${GREEN}orchestrator/world.yaml: ${cnt} tag(s) bumped to ${new}${NC}"
+    fi
 }
 
 restart_stack() {
@@ -219,10 +253,14 @@ cleanup_after_apply() {
     #    Steam metadata: not needed at runtime.
     rm -rf "$SERVER_PATH/steamapps" 2>/dev/null || true
 
-    # 4) Drop the compose backup — git history has the diff and the rollback
-    #    path reads $COMPOSE_FILE.bak only if present, so leaving it would
-    #    confuse a future rollback after a *subsequent* apply succeeded.
+    # 4) Drop the .bak files left by the apply step. Leaving them would
+    #    confuse a future rollback after a *subsequent* apply succeeded —
+    #    rollback prefers .bak when present and would revert to the wrong
+    #    version. git history / steamapps / the previous tag in compose
+    #    are enough to reconstruct if needed.
     rm -f "$COMPOSE_FILE.bak" 2>/dev/null || true
+    rm -f "$G_SCRIPT_PATH/gateway-override.ini.bak" 2>/dev/null || true
+    rm -f "$G_SCRIPT_PATH/orchestrator/world.yaml.bak" 2>/dev/null || true
 
     local size
     size=$(du -sh "$SERVER_PATH" 2>/dev/null | awk '{print $1}')
@@ -429,6 +467,25 @@ cmd_rollback() {
         sed -i -E "s|(registry\\.funcom\\.com/funcom/self-hosting/[^:]+):${NEW_TAG}|\\1:${OLD_TAG}|g" \
             "$COMPOSE_FILE"
         echo "${GREEN}Reverted compose tag via sed${NC}"
+    fi
+
+    # Same treatment for the two version-baked sidecars patched on apply.
+    local gw_ini="$G_SCRIPT_PATH/gateway-override.ini"
+    if [ -f "$gw_ini.bak" ]; then
+        mv "$gw_ini.bak" "$gw_ini"
+        echo "${GREEN}Restored $gw_ini from .bak${NC}"
+    elif [ -f "$gw_ini" ]; then
+        local old_rev="${OLD_TAG%%-*}" new_rev="${NEW_TAG%%-*}"
+        sed -i -E "s|^(revision[[:space:]]*=[[:space:]]*)${new_rev}\$|\\1${old_rev}|" "$gw_ini"
+        echo "${GREEN}Reverted gateway-override.ini revision via sed${NC}"
+    fi
+    local world_yaml="$G_SCRIPT_PATH/orchestrator/world.yaml"
+    if [ -f "$world_yaml.bak" ]; then
+        mv "$world_yaml.bak" "$world_yaml"
+        echo "${GREEN}Restored $world_yaml from .bak${NC}"
+    elif [ -f "$world_yaml" ]; then
+        sed -i -E "s|(funcom/self-hosting/[a-z-]+):${NEW_TAG}|\\1:${OLD_TAG}|g" "$world_yaml"
+        echo "${GREEN}Reverted orchestrator/world.yaml via sed${NC}"
     fi
 
     # Stop game servers + director so DB restore doesn't conflict with live
