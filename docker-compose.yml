@@ -96,6 +96,35 @@ services:
         condition: service_healthy
     restart: "no"
 
+  # Apply pending schema migrations from Database/Upgrade/. Each game build
+  # ships its own migrations; the game-server hard-checks the applied set at
+  # startup and refuses to run with "Database is missing patches required
+  # for this build" if any are absent. Runs idempotently — no-op when up to
+  # date. Invoked from update.sh apply, plus operators can run manually:
+  #   docker compose run --rm db-upgrade
+  db-upgrade:
+    image: registry.funcom.com/funcom/self-hosting/seabass-server-db-utils:1968181-0-shipping
+    logging: *default-logging
+    entrypoint: ["python", "/root/PSQL/updatedb.py"]
+    environment:
+      FUNCOM_POSTGRES_INSTALL: /usr
+    command:
+      - --host=postgres:5432
+      - --project-database=dune
+      - --project-user=dune
+      - --project-password=${POSTGRES_DUNE_PASS}
+      - --admin-user=postgres
+      - --admin-password=${POSTGRES_SUPER_PASS}
+      - --local-as-remote
+      - --unattended
+      # Skip its own pre-migration backup — update.sh already snapshotted.
+      - --no-backup
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+    profiles: ["upgrade"]
+
   partition-seed:
     # One-shot: insert world_partition rows for the always-on maps.
     # The K8s operator does this from BattleGroup CR spec.database…worldPartitions[];
