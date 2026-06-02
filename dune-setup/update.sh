@@ -231,8 +231,12 @@ refresh_on_demand_containers() {
     local count
     count=$(echo "$on_demand" | wc -l)
     echo "Refreshing $count on-demand game-server containers..."
+    # `dc create --force-recreate` is the documented "rebuild container
+    # at current spec but don't start it" command. (`dc up -d
+    # --no-start` is a no-op combo: -d implies start, --no-start says
+    # don't, and silently nothing happens.)
     # shellcheck disable=SC2086  # word-splitting is intended
-    dc up -d --no-start --force-recreate $on_demand 2>&1 | tail -3 || true
+    dc create --force-recreate $on_demand 2>&1 | tail -3 || true
     echo "${GREEN}On-demand containers refreshed${NC}"
 }
 
