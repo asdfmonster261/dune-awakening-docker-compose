@@ -200,6 +200,40 @@ bump_version_sidecars() {
 restart_stack() {
     echo "Restarting stack..."
     dc up -d
+    # dune-orchestrator reads /world.yaml once at startup (os.ReadFile in
+    # main.go). update_compose_tags / bump_version_sidecars just modified
+    # that file (image tags + FarmRegion quoting), so the orchestrator's
+    # in-memory copy is stale until restarted. The compose spec for
+    # dune-orchestrator itself didn't change, so `dc up -d` won't recreate
+    # it — explicit restart needed.
+    dc restart dune-orchestrator 2>/dev/null || true
+}
+
+# Refresh the on-demand game-server containers (sietches, dungeons, story
+# instances). Each one is a compose service behind the `on-demand`
+# profile, so `dc up -d` doesn't touch them — but their stored container
+# spec still references the OLD image tag and the OLD unquoted FarmRegion.
+# When dune-orchestrator next asks to start one, docker starts the
+# pre-created container with the stale spec → broken sietch.
+#
+# `--no-start --force-recreate` wipes + recreates each container at the
+# current compose spec but leaves them in "created" state so the
+# orchestrator can launch them on demand as usual.
+refresh_on_demand_containers() {
+    local on_demand
+    on_demand=$(dc config --services 2>/dev/null \
+                | grep -E "^game-server-" \
+                | grep -vE "^game-server-(survival|overmap)$")
+    if [ -z "$on_demand" ]; then
+        echo "(no on-demand game-server services found; skipping)"
+        return
+    fi
+    local count
+    count=$(echo "$on_demand" | wc -l)
+    echo "Refreshing $count on-demand game-server containers..."
+    # shellcheck disable=SC2086  # word-splitting is intended
+    dc up -d --no-start --force-recreate $on_demand 2>&1 | tail -3 || true
+    echo "${GREEN}On-demand containers refreshed${NC}"
 }
 
 # Run updatedb.py against the live postgres with the just-loaded image.
@@ -438,6 +472,7 @@ cmd_apply() {
     load_images_from_staging
     update_compose_tags "$current" "$new"
     apply_db_migrations
+    refresh_on_demand_containers
     restart_stack
 
     if verify; then
