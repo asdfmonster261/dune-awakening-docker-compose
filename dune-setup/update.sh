@@ -202,6 +202,28 @@ restart_stack() {
     dc up -d
 }
 
+# Run db-utils against the live postgres with the just-loaded image. Each
+# build ships migrations in /root/DuneSandbox/Database/Upgrade/ — the
+# game-server refuses to start when its expected migration list doesn't
+# match what's applied ("The database is missing patches required for
+# this build"). startdb.py is idempotent: existing migrations are skipped.
+#
+# Stop the game-servers first so the OLD image isn't running against the
+# NEW schema mid-migration. The stack comes back up via restart_stack().
+apply_db_migrations() {
+    echo "Applying DB migrations (db-utils, new image)..."
+    dc stop game-server-survival game-server-overmap 2>/dev/null || true
+    # `run --rm` invokes db-utils one-shot with the current compose tag
+    # (we just bumped it). depends_on waits for postgres healthy.
+    if ! dc run --rm db-utils; then
+        echo "${RED}db-utils failed — game-servers will refuse to start.${NC}" >&2
+        echo "  Pre-update DB backup is at: ${PRE_UPDATE_SNAPSHOT:-?}" >&2
+        echo "  Run './update.sh rollback' to revert." >&2
+        exit 1
+    fi
+    echo "${GREEN}Migrations applied${NC}"
+}
+
 # Promote the files we actually need from .updates/ into server/ and delete
 # the rest. Run after verify succeeds. Wrapped in `|| true` so cleanup failures
 # don't poison a successful apply.
@@ -413,6 +435,7 @@ cmd_apply() {
     write_state "$PRE_UPDATE_SNAPSHOT" "$current" "$new"
     load_images_from_staging
     update_compose_tags "$current" "$new"
+    apply_db_migrations
     restart_stack
 
     if verify; then
