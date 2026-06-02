@@ -18,6 +18,11 @@ research/
 # Compiled binaries
 dune-setup/orchestrator/dune-orchestrator
 
+# update.sh artifacts
+.updates/
+.last-update
+docker-compose.yml.bak
+
 # Editor / OS junk
 .DS_Store
 *.swp
