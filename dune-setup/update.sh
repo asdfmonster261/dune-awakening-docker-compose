@@ -220,8 +220,12 @@ restart_stack() {
 # current compose spec but leaves them in "created" state so the
 # orchestrator can launch them on demand as usual.
 refresh_on_demand_containers() {
+    # The on-demand services live behind `profiles: [on-demand]`; without
+    # `--profile on-demand`, `dc config --services` hides them AND `dc
+    # create` won't touch them. Pass the flag to BOTH the listing and
+    # the create call.
     local on_demand
-    on_demand=$(dc config --services 2>/dev/null \
+    on_demand=$(dc --profile on-demand config --services 2>/dev/null \
                 | grep -E "^game-server-" \
                 | grep -vE "^game-server-(survival|overmap)$")
     if [ -z "$on_demand" ]; then
@@ -234,9 +238,10 @@ refresh_on_demand_containers() {
     # `dc create --force-recreate` is the documented "rebuild container
     # at current spec but don't start it" command. (`dc up -d
     # --no-start` is a no-op combo: -d implies start, --no-start says
-    # don't, and silently nothing happens.)
+    # don't, and silently nothing happens. `dc create` with empty args
+    # would recreate every default-profile service — guard above.)
     # shellcheck disable=SC2086  # word-splitting is intended
-    dc create --force-recreate $on_demand 2>&1 | tail -3 || true
+    dc --profile on-demand create --force-recreate $on_demand 2>&1 | tail -3 || true
     echo "${GREEN}On-demand containers refreshed${NC}"
 }
 
