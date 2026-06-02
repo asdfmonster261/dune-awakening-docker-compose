@@ -239,8 +239,19 @@ services:
       DOCKER_PROJECT: dune-server
       LISTEN_ADDR: ":8080"
       ALLOWED_ORIGINS: http://localhost:6847
+      # Tell the admin where the mounted host files are.
+      HOST_ENV_FILE: /host/.env
+      HOST_USERENGINE_INI: /host/UserEngine.ini
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
+      # Persists audit.jsonl across container rebuilds. Anything else the
+      # admin panel wants durable (cached blueprints, etc.) goes here too.
+      - dune-admin-data:/data
+      # Mounted so the Settings tab can read+write a curated subset of
+      # cosmetic + gameplay knobs. .env contains secrets we deliberately
+      # do NOT expose through the API — the backend whitelists keys.
+      - ./.env:/host/.env
+      - ./dune-setup/usersettings/UserEngine.ini:/host/UserEngine.ini
     depends_on:
       postgres:
         condition: service_healthy
@@ -1281,3 +1292,4 @@ volumes:
   postgres-data:
   filebrowser-data:
   postgres-backups:
+  dune-admin-data:
