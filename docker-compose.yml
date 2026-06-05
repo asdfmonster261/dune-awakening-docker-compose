@@ -558,9 +558,7 @@ services:
       - ./dune-setup/orchestrator/serviceaccount:/var/run/secrets/kubernetes.io/serviceaccount:ro
       # mini-UE4SS deployment dir. Built artifacts + config live host-side in
       # ./mini-ue4ss/ (gitignored); see mini-UE4SS/profiles/dune-1979201/.
-      # RW: UE4SS writes UE4SS.log here on init; signature scan cache + crash
-      # dumps land in this dir too.
-      - ./mini-ue4ss:/opt/mini-ue4ss
+      - ./mini-ue4ss:/opt/mini-ue4ss:ro
     ports:
       - "7778:7778/udp"
     mem_limit: 2g
