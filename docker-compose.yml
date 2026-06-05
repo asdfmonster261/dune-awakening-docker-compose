@@ -539,26 +539,7 @@ services:
       <<: *game-server-env
       POD_NAME: game-server-overmap-0
       NODE_NAME: game-server-overmap-0
-      # mini-UE4SS injection — overmap-only smoke test for the Linux UE4SS port.
-      # Scoped to this single service; volumes are inline-expanded below so the
-      # bind mounts don't leak to survival/on-demand maps. LD_PRELOAD must stay
-      # env (dynamic linker reads it before any of our code can run).
-      LD_PRELOAD: /opt/mini-ue4ss/libUE4SS.so
-      # The injected ctor filters by exe basename so unrelated child processes
-      # (notably SSH startup helpers) don't all try to spin up UE4SS.
-      UE4SS_TARGET_BINARY: DuneSandboxServer-Linux-Shipping
-    volumes:
-      # Inline-expanded from *game-server-volumes so we can append the
-      # mini-ue4ss read-only mounts overmap-only (YAML sequences can't be
-      # merged via <<:).
-      - ./dune-setup/usersettings/UserEngine.ini:/home/dune/server/DuneSandbox/Saved/UserSettings/UserEngine.ini:ro
-      - ./dune-setup/usersettings/UserGame.ini:/home/dune/server/DuneSandbox/Saved/UserSettings/UserGame.ini:ro
-      - ./dune-setup/certs/cacert.pem:/etc/ssl/certs/rabbitmq-ca.pem:ro
-      - ./dune-setup/disable-ssh.sh:/etc/init.d/ssh:ro
-      - ./dune-setup/orchestrator/serviceaccount:/var/run/secrets/kubernetes.io/serviceaccount:ro
-      # mini-UE4SS deployment dir. Built artifacts + config live host-side in
-      # ./mini-ue4ss/ (gitignored); see mini-UE4SS/profiles/dune-1979201/.
-      - ./mini-ue4ss:/opt/mini-ue4ss:ro
+    volumes: *game-server-volumes
     ports:
       - "7778:7778/udp"
     mem_limit: 2g
