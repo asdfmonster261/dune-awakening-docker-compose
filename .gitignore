@@ -23,6 +23,11 @@ dune-setup/orchestrator/dune-orchestrator
 .last-update
 docker-compose.yml.bak
 
+# mini-UE4SS deployment dir (built artifacts + per-game config); the .so is
+# rebuilt from the mini-UE4SS repo, the config files live in
+# mini-UE4SS/profiles/dune-1979201/. Don't track any of it here.
+mini-ue4ss/
+
 # Editor / OS junk
 .DS_Store
 *.swp
