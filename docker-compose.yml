@@ -47,7 +47,7 @@ x-logging: &default-logging
 # That creates the containers in "Created" state without starting them; the
 # dune-orchestrator starts/stops them on demand.
 x-on-demand-game-server: &on-demand-game-server
-  image: registry.funcom.com/funcom/self-hosting/seabass-server:1968181-0-shipping
+  image: registry.funcom.com/funcom/self-hosting/seabass-server:1979201-0-shipping
   logging: *default-logging
   volumes: *game-server-volumes
   stop_grace_period: 120s
@@ -75,7 +75,7 @@ services:
     restart: unless-stopped
 
   db-utils:
-    image: registry.funcom.com/funcom/self-hosting/seabass-server-db-utils:1968181-0-shipping
+    image: registry.funcom.com/funcom/self-hosting/seabass-server-db-utils:1979201-0-shipping
     logging: *default-logging
     entrypoint: ["python", "startdb.py"]
     # FUNCOM_POSTGRES_INSTALL points the funcomdb installation API at the system
@@ -103,7 +103,7 @@ services:
   # date. Invoked from update.sh apply, plus operators can run manually:
   #   docker compose run --rm db-upgrade
   db-upgrade:
-    image: registry.funcom.com/funcom/self-hosting/seabass-server-db-utils:1968181-0-shipping
+    image: registry.funcom.com/funcom/self-hosting/seabass-server-db-utils:1979201-0-shipping
     logging: *default-logging
     entrypoint: ["python", "/root/PSQL/updatedb.py"]
     environment:
@@ -289,7 +289,7 @@ services:
     restart: unless-stopped
 
   rabbitmq-admin:
-    image: registry.funcom.com/funcom/self-hosting/seabass-server-rabbitmq:1968181-0-shipping
+    image: registry.funcom.com/funcom/self-hosting/seabass-server-rabbitmq:1979201-0-shipping
     logging: *default-logging
     hostname: rabbitmq-admin
     environment:
@@ -310,7 +310,7 @@ services:
     restart: unless-stopped
 
   rabbitmq-game:
-    image: registry.funcom.com/funcom/self-hosting/seabass-server-rabbitmq:1968181-0-shipping
+    image: registry.funcom.com/funcom/self-hosting/seabass-server-rabbitmq:1979201-0-shipping
     logging: *default-logging
     hostname: rabbitmq-game
     environment:
@@ -337,7 +337,7 @@ services:
     restart: unless-stopped
 
   text-router:
-    image: registry.funcom.com/funcom/self-hosting/seabass-server-text-router:1968181-0-shipping
+    image: registry.funcom.com/funcom/self-hosting/seabass-server-text-router:1979201-0-shipping
     logging: *default-logging
     command:
       - --RMQGameHostname=rabbitmq-game
@@ -383,7 +383,7 @@ services:
     restart: unless-stopped
 
   bg-director:
-    image: registry.funcom.com/funcom/self-hosting/seabass-server-bg-director:1968181-0-shipping
+    image: registry.funcom.com/funcom/self-hosting/seabass-server-bg-director:1979201-0-shipping
     logging: *default-logging
     command:
       - --RMQGameHostname=rabbitmq-game
@@ -429,7 +429,7 @@ services:
     restart: unless-stopped
 
   server-gateway:
-    image: registry.funcom.com/funcom/self-hosting/seabass-server-gateway:1968181-0-shipping
+    image: registry.funcom.com/funcom/self-hosting/seabass-server-gateway:1979201-0-shipping
     logging: *default-logging
     environment:
       FuncomLiveServices__ServiceAuthToken: ${FLS_TOKEN}
@@ -460,7 +460,7 @@ services:
     restart: unless-stopped
 
   game-server-survival:
-    image: registry.funcom.com/funcom/self-hosting/seabass-server:1968181-0-shipping
+    image: registry.funcom.com/funcom/self-hosting/seabass-server:1979201-0-shipping
     logging: *default-logging
     # hostname/POD_NAME end in -0 to mimic K8s StatefulSet pod ordinals; the
     # game-server binary parses the trailing number as its stable server index.
@@ -510,7 +510,7 @@ services:
     restart: unless-stopped
 
   game-server-overmap:
-    image: registry.funcom.com/funcom/self-hosting/seabass-server:1968181-0-shipping
+    image: registry.funcom.com/funcom/self-hosting/seabass-server:1979201-0-shipping
     logging: *default-logging
     hostname: game-server-overmap-0
     command:
