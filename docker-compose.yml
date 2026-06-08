@@ -517,6 +517,12 @@ services:
       - ./mini-ue4ss:/opt/mini-ue4ss
     ports:
       - "7777:7777/udp"
+      # mini-UE4SS Wave 7.23 — TCP Lua REPL. Bound to all interfaces
+      # inside the container; access is gated by `[Debug].LuaReplPassword`
+      # in /opt/mini-ue4ss/UE4SS-settings.ini. Only published when the
+      # REPL is enabled — otherwise the listener never binds and the
+      # port mapping is inert.
+      - "9876:9876/tcp"
     mem_limit: 12g
     stop_grace_period: 120s
     depends_on:
