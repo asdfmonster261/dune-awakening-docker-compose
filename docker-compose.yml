@@ -505,6 +505,10 @@ services:
       # su) don't all try to bring up UE4SS.
       LD_PRELOAD: /opt/mini-ue4ss/libminiue4ss.so
       UE4SS_TARGET_BINARY: DuneSandboxServer-Linux-Shipping
+      # Per-container log file. Without this both survival + DD would
+      # interleave into the shared bind-mount's /opt/mini-ue4ss/miniue4ss.log.
+      # Env-var precedence > [Log].FilePath INI > built-in default.
+      UE4SS_LOG_PATH: /opt/mini-ue4ss/miniue4ss-survival.log
     # Inline-expanded from *game-server-volumes so the mini-UE4SS
     # bind mount is survival-only and doesn't leak to overmap or
     # on-demand maps. ./mini-ue4ss/ is gitignored — see the
@@ -747,8 +751,27 @@ services:
       <<: *game-server-env
       POD_NAME: game-server-deepdesert-1-0
       NODE_NAME: game-server-deepdesert-1-0
+      # mini-UE4SS injection on DD too. UE4SS_LOG_PATH keeps DD's lines
+      # from interleaving with survival's into the shared bind-mount.
+      LD_PRELOAD: /opt/mini-ue4ss/libminiue4ss.so
+      UE4SS_TARGET_BINARY: DuneSandboxServer-Linux-Shipping
+      UE4SS_LOG_PATH: /opt/mini-ue4ss/miniue4ss-deepdesert.log
+    # Inline-expanded from *game-server-volumes so we can add the
+    # mini-ue4ss bind mount that survival uses (same shape as that
+    # service's volumes block above).
+    volumes:
+      - ./dune-setup/usersettings/UserEngine.ini:/home/dune/server/DuneSandbox/Saved/UserSettings/UserEngine.ini:ro
+      - ./dune-setup/usersettings/UserGame.ini:/home/dune/server/DuneSandbox/Saved/UserSettings/UserGame.ini:ro
+      - ./dune-setup/certs/cacert.pem:/etc/ssl/certs/rabbitmq-ca.pem:ro
+      - ./dune-setup/disable-ssh.sh:/etc/init.d/ssh:ro
+      - ./dune-setup/orchestrator/serviceaccount:/var/run/secrets/kubernetes.io/serviceaccount:ro
+      - ./mini-ue4ss:/opt/mini-ue4ss
     ports:
       - "7784:7784/udp"
+      # mini-UE4SS REPL on a different host port from survival's 9876
+      # so both can publish without clashing. Container-side port stays
+      # 9876 since it's hardcoded in [Debug].LuaReplPort.
+      - "9877:9876/tcp"
 
   game-server-story-procesverbal:
     <<: *on-demand-game-server
