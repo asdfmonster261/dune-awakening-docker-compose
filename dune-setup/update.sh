@@ -3,12 +3,16 @@
 # (app 4754530) and apply it to the running docker-compose stack.
 #
 # Usage:
-#   ./update.sh check     - download latest, compare against installed, exit
-#   ./update.sh apply     - check + pre-update backup + load + tag swap +
-#                           restart + verify; pauses for rollback on failure
-#   ./update.sh verify    - re-run the post-update health checks
-#   ./update.sh rollback  - revert to the previous tag + restore the pre-update
-#                           snapshot. Reads state from .last-update.
+#   ./update.sh check          - download latest, compare against installed, exit
+#   ./update.sh apply [--force] - check + pre-update backup + load + tag swap +
+#                                restart + verify; pauses for rollback on failure.
+#                                --force re-applies even when version.txt is
+#                                unchanged (Funcom hotfixes that ship under the
+#                                same build number — docker load picks up the
+#                                changed tarball layers).
+#   ./update.sh verify         - re-run the post-update health checks
+#   ./update.sh rollback       - revert to the previous tag + restore the pre-update
+#                                snapshot. Reads state from .last-update.
 #
 # Steam downloads land in $REPO_ROOT/.updates/ (staging). Pre-update DB
 # snapshots go into the postgres-backup volume with a "pre-update-" prefix
@@ -442,22 +446,30 @@ cmd_check() {
 cmd_apply() {
     require_cmd steamcmd docker
 
-    # Parse flags. Currently only --no-clean.
+    # Parse flags.
+    local force=0
     while [ $# -gt 0 ]; do
         case "$1" in
             --no-clean) NO_CLEAN=1; shift ;;
+            --force|-f) force=1; shift ;;
             *) echo "Unknown flag: $1" >&2; exit 1 ;;
         esac
     done
 
     # Reuse cmd_check for download + summary. cmd_check returns 1 when an
-    # update is available; treat that as success here.
+    # update is available, 0 when up to date. With --force we re-apply
+    # regardless — useful when Funcom ships a hotfix under the same build
+    # number (the version.txt stays the same but image tarballs change,
+    # so docker load picks up the new layers).
     local check_rc=0
     cmd_check || check_rc=$?
     case $check_rc in
         0)
-            echo "Nothing to do."
-            exit 0
+            if [ $force -eq 0 ]; then
+                echo "Nothing to do."
+                exit 0
+            fi
+            echo "${YELLOW}Up to date, but --force given — re-applying anyway${NC}"
             ;;
         1) ;;
         *) exit $check_rc ;;
@@ -468,7 +480,11 @@ cmd_apply() {
     new=$(staged_version)
 
     echo
-    read -r -p "Proceed with applying ${current} → ${new}? [y/N]: " yn
+    if [ "$current" = "$new" ]; then
+        read -r -p "Proceed with force-reapplying ${current}? [y/N]: " yn
+    else
+        read -r -p "Proceed with applying ${current} → ${new}? [y/N]: " yn
+    fi
     case "$yn" in
         [yY]*) ;;
         *) echo "Aborted."; exit 0;;
@@ -479,7 +495,12 @@ cmd_apply() {
     # has everything it needs even if a later step blows up.
     write_state "$PRE_UPDATE_SNAPSHOT" "$current" "$new"
     load_images_from_staging
-    update_compose_tags "$current" "$new"
+    # When current == new, the sed substitutions in update_compose_tags
+    # are no-ops (good), but skipping the call avoids a misleading "tags
+    # updated" log line and the spurious .bak files.
+    if [ "$current" != "$new" ]; then
+        update_compose_tags "$current" "$new"
+    fi
     apply_db_migrations
     refresh_on_demand_containers
     restart_stack
@@ -594,14 +615,20 @@ main() {
             cat <<EOF
 Usage: $0 {check|apply|verify|rollback}
 
-  check               Download latest from Steam, report version delta. No changes.
-  apply [--no-clean]  check + pre-update DB backup + docker load + compose tag swap +
-                      restart + verify. Pauses with rollback prompt on verify failure.
-                      On success, prunes unused tarballs / Funcom installer scripts /
-                      Steam metadata from server/ (pass --no-clean to keep them).
-  verify              Re-run the post-update health checks (useful when boots are slow).
-  rollback            Revert to the previous tag and restore the pre-update DB snapshot.
-                      Uses state recorded in ${STATE_FILE}.
+  check                       Download latest from Steam, report version delta. No changes.
+  apply [--no-clean] [--force]
+                              check + pre-update DB backup + docker load + compose tag
+                              swap + restart + verify. Pauses with rollback prompt on
+                              verify failure. On success, prunes unused tarballs /
+                              Funcom installer scripts / Steam metadata from server/
+                              (pass --no-clean to keep them).
+                              --force / -f re-applies even when the staged version
+                              matches the installed version (for Funcom hotfixes that
+                              ship under the same build number — docker load picks up
+                              the changed tarball layers).
+  verify                      Re-run the post-update health checks (useful when boots are slow).
+  rollback                    Revert to the previous tag and restore the pre-update DB snapshot.
+                              Uses state recorded in ${STATE_FILE}.
 EOF
             ;;
         *)
